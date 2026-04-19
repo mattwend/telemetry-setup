@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+
+# Example OtlpConfig for exporting to GreptimeDB over OTLP/HTTP.
+#
+# This config enables OTLP export only. Local stdout/journald logging uses the
+# TelemetryBuilder stdout filter, which defaults to RUST_LOG and then "info".
+url = "http://localhost:4318"
+
+# Filter expression applied to OTLP trace and log export layers.
+log_level = "info"
+
+service_name = "controller"
+log_rate_limit_per_sec = 100
+
+# Sent with traces, logs, and metrics.
+[headers.common]
+X-Greptime-DB-Name = "edge"
+
+# Sent only with trace exports.
+[headers.traces]
+x-greptime-pipeline-name = "greptime_trace_v1"
+
+# Sent only with log exports.
+[headers.logs]
+x-greptime-pipeline-name = "greptime_identity"
+
+# Greptime metrics do not require a pipeline header by default, but custom
+# metric-only headers can be configured here.
+[headers.metrics]
