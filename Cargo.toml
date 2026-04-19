@@ -1,0 +1,63 @@
+[package]
+name = "telemetry-setup"
+authors = ["Matthias Wende"]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Opinionated shared telemetry setup for Rust services"
+repository = "https://github.com/mattwend/telemetry-setup"
+readme = "README.md"
+keywords = ["telemetry", "tracing", "opentelemetry", "otlp", "logging"]
+categories = ["development-tools::debugging", "development-tools::profiling", "rust-patterns"]
+rust-version = "1.85"
+
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-appender-tracing",
+    "dep:tracing-opentelemetry",
+    "dep:url",
+]
+journald = ["dep:tracing-journald"]
+log-control = ["dep:axum"]
+tokio-metrics = ["otlp"]
+
+[dependencies]
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.52", features = ["net", "rt", "sync", "time"] }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["http-proto", "trace", "metrics", "logs"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics", "logs"], optional = true }
+opentelemetry-appender-tracing = { version = "0.31", optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+tracing-journald = { version = "0.3", optional = true }
+axum = { version = "0.8", optional = true }
+url = { version = "2.5", optional = true }
+tokio-util = "0.7"
+
+[[example]]
+name = "greptime_otlp"
+required-features = ["otlp"]
+
+[[example]]
+name = "stdout_only"
+
+[[example]]
+name = "stdout_custom_filter"
+
+[dev-dependencies]
+toml = "1.1"
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time"] }
+tower = { version = "0.5", features = ["util"] }
