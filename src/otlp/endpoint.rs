@@ -8,8 +8,13 @@ use super::config::OtlpConfig;
 use crate::error::TelemetryError;
 
 /// Returns the per-signal OTLP endpoint derived from `base_url` and `suffix`.
-pub(super) fn signal_endpoint(base_url: &str, suffix: &str) -> Result<String, TelemetryError> {
-    let parsed = Url::parse(base_url).map_err(TelemetryError::otlp_endpoint)?;
+pub(super) fn signal_endpoint(
+    base_url: &str,
+    suffix: &str,
+    signal: &'static str,
+) -> Result<String, TelemetryError> {
+    let parsed =
+        Url::parse(base_url).map_err(|error| TelemetryError::otlp_endpoint(signal, error))?;
     if parsed.path().ends_with(suffix) {
         return Ok(base_url.to_string());
     }
@@ -53,19 +58,25 @@ mod tests {
     #[test]
     fn signal_endpoint_appends_suffix_once() {
         assert_eq!(
-            signal_endpoint("http://localhost:4318", "v1/traces").unwrap(),
+            signal_endpoint("http://localhost:4318", "v1/traces", "traces").unwrap(),
             "http://localhost:4318/v1/traces"
         );
         assert_eq!(
-            signal_endpoint("http://localhost:4318/v1/traces", "v1/traces").unwrap(),
+            signal_endpoint("http://localhost:4318/v1/traces", "v1/traces", "traces").unwrap(),
             "http://localhost:4318/v1/traces"
         );
     }
 
     #[test]
     fn signal_endpoint_reports_invalid_urls_as_endpoint_errors() {
-        let error = signal_endpoint("://not-a-url", "v1/traces").unwrap_err();
-        assert!(matches!(error, TelemetryError::OtlpEndpoint(_)));
+        let error = signal_endpoint("://not-a-url", "v1/traces", "traces").unwrap_err();
+        assert!(matches!(
+            error,
+            TelemetryError::OtlpEndpoint {
+                signal: "traces",
+                ..
+            }
+        ));
     }
 
     #[test]

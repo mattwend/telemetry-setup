@@ -8,7 +8,7 @@ use telemetry_setup::TelemetryBuilder;
 
 #[tokio::test]
 async fn stdout_only_init_succeeds_and_returns_shutdown_guard() {
-    let guard = TelemetryBuilder::new("controller")
+    let mut guard = TelemetryBuilder::new("controller")
         .without_env_var()
         .with_stdout_filter("info")
         .init()

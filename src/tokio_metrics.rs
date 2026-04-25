@@ -33,7 +33,7 @@ struct TokioRuntimeMetrics {
 /// # Returns
 ///
 /// A join handle for the spawned background task.
-pub fn start_tokio_metrics_monitoring(
+pub(crate) fn start_tokio_metrics_monitoring(
     cancel_token: CancellationToken,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {

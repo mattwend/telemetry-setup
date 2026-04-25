@@ -11,7 +11,10 @@
 //! does not discover or load repository-local config files automatically.
 //! Initialize telemetry with [`TelemetryBuilder`] and keep the returned
 //! [`TelemetryGuard`] alive for the process lifetime. For graceful teardown,
-//! call [`TelemetryGuard::shutdown`] before the runtime exits.
+//! call [`TelemetryGuard::shutdown`] before the runtime exits. Dropping the
+//! guard without explicit shutdown is best-effort: on a multi-thread Tokio
+//! runtime, OTLP providers are flushed through `tokio::task::block_in_place`,
+//! while on a `current_thread` runtime drop may skip the final OTLP flush.
 //!
 //! # Stdout-only setup
 //!
@@ -22,7 +25,7 @@
 //! use telemetry_setup::TelemetryBuilder;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let telemetry = TelemetryBuilder::new("controller").init()?;
+//! let mut telemetry = TelemetryBuilder::new("controller").init()?;
 //! tracing::info!("started");
 //! telemetry.shutdown().await?;
 //! # Ok(())
@@ -53,8 +56,7 @@
 //! - `otlp`: OTLP trace, log, and metric export.
 //! - `journald`: `tracing-journald` output.
 //! - `log-control`: localhost-only runtime filter update endpoints.
-//! - `tokio-metrics`: Tokio runtime gauges exported through OTLP/OpenTelemetry;
-//!   implies `otlp`.
+//! - `tokio-metrics`: Tokio runtime gauges exported through OpenTelemetry.
 //!
 //! # Prerequisites
 //!

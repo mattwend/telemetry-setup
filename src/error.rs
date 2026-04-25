@@ -31,12 +31,15 @@ pub enum TelemetryError {
     /// Tokio metrics were requested without compiling the `tokio-metrics` feature.
     #[error("the telemetry crate was built without the `tokio-metrics` feature")]
     TokioMetricsFeatureDisabled,
-    /// Tokio metrics were enabled without a runtime OTLP configuration.
-    #[error("Tokio metrics require OTLP export to be configured")]
-    TokioMetricsRequiresOtlp,
     /// An OTLP endpoint URL was invalid.
-    #[error("invalid OTLP endpoint URL: {0}")]
-    OtlpEndpoint(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("invalid OTLP {signal} endpoint URL: {source}")]
+    OtlpEndpoint {
+        /// Signal whose endpoint URL failed to parse.
+        signal: &'static str,
+        /// Underlying URL parse error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// A tracked telemetry background task failed during shutdown.
     #[error("telemetry background task failed: {0}")]
     BackgroundTask(#[from] BackgroundTaskError),
@@ -87,11 +90,14 @@ impl TelemetryError {
     }
 
     #[cfg(feature = "otlp")]
-    pub(crate) fn otlp_endpoint<E>(error: E) -> Self
+    pub(crate) fn otlp_endpoint<E>(signal: &'static str, error: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
-        Self::OtlpEndpoint(Box::new(error))
+        Self::OtlpEndpoint {
+            signal,
+            source: Box::new(error),
+        }
     }
 }
 
@@ -129,7 +135,7 @@ mod tests {
         let trace = TelemetryError::trace_provider(TestError("trace boom"));
         let log = TelemetryError::log_provider(TestError("log boom"));
         let meter = TelemetryError::meter_provider(TestError("meter boom"));
-        let endpoint = TelemetryError::otlp_endpoint(TestError("endpoint boom"));
+        let endpoint = TelemetryError::otlp_endpoint("traces", TestError("endpoint boom"));
 
         assert_eq!(
             trace.to_string(),
@@ -145,12 +151,12 @@ mod tests {
         );
         assert_eq!(
             endpoint.to_string(),
-            "invalid OTLP endpoint URL: endpoint boom"
+            "invalid OTLP traces endpoint URL: endpoint boom"
         );
         assert!(matches!(trace, TelemetryError::TraceProvider(_)));
         assert!(matches!(log, TelemetryError::LogProvider(_)));
         assert!(matches!(meter, TelemetryError::MeterProvider(_)));
-        assert!(matches!(endpoint, TelemetryError::OtlpEndpoint(_)));
+        assert!(matches!(endpoint, TelemetryError::OtlpEndpoint { .. }));
     }
 
     #[cfg(feature = "log-control")]
