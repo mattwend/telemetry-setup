@@ -1,5 +1,8 @@
 # telemetry-setup
 
+[![CI](https://github.com/mattwend/telemetry-setup/actions/workflows/ci.yml/badge.svg)](https://github.com/mattwend/telemetry-setup/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/mattwend/telemetry-setup/branch/v0.x.x/graph/badge.svg)](https://codecov.io/gh/mattwend/telemetry-setup)
+
 Opinionated shared telemetry setup for workspace Rust services.
 
 ## What it does
