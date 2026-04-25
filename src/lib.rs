@@ -5,7 +5,7 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-//! Shared telemetry primitives for workspace services.
+//! Opinionated telemetry primitives for Rust services.
 //!
 //! The crate is configured explicitly by the service that owns the process. It
 //! does not discover or load repository-local config files automatically.
