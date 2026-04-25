@@ -20,6 +20,7 @@ pub(crate) struct BuiltProviders {
     /// Meter provider installed into the OpenTelemetry global meter registry.
     pub meter_provider: SdkMeterProvider,
     /// The final `service.name` value applied to all emitted resources.
+    #[cfg(test)]
     pub effective_service_name: String,
 }
 
@@ -83,6 +84,7 @@ pub(crate) fn build_providers(
         tracer_provider,
         logger_provider,
         meter_provider,
+        #[cfg(test)]
         effective_service_name,
     })
 }
@@ -94,7 +96,7 @@ fn build_trace_exporter(
     opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(signal_endpoint(&config.url, "v1/traces")?)
+        .with_endpoint(signal_endpoint(&config.url, "v1/traces", "traces")?)
         .with_headers(signal_headers(config, &config.headers.traces))
         .build()
         .map_err(TelemetryError::trace_provider)
@@ -107,7 +109,7 @@ fn build_log_exporter(
     opentelemetry_otlp::LogExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(signal_endpoint(&config.url, "v1/logs")?)
+        .with_endpoint(signal_endpoint(&config.url, "v1/logs", "logs")?)
         .with_headers(signal_headers(config, &config.headers.logs))
         .build()
         .map_err(TelemetryError::log_provider)
@@ -120,7 +122,7 @@ fn build_metric_exporter(
     opentelemetry_otlp::MetricExporter::builder()
         .with_http()
         .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(signal_endpoint(&config.url, "v1/metrics")?)
+        .with_endpoint(signal_endpoint(&config.url, "v1/metrics", "metrics")?)
         .with_headers(signal_headers(config, &config.headers.metrics))
         .build()
         .map_err(TelemetryError::meter_provider)
@@ -178,6 +180,12 @@ mod tests {
             },
         );
 
-        assert!(matches!(result, Err(TelemetryError::OtlpEndpoint(_))));
+        assert!(matches!(
+            result,
+            Err(TelemetryError::OtlpEndpoint {
+                signal: "traces",
+                ..
+            })
+        ));
     }
 }

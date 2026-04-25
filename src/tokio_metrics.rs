@@ -15,7 +15,7 @@ struct TokioRuntimeMetrics {
     global_queue_depth: u64,
 }
 
-/// Starts a background task that records Tokio runtime gauges every five seconds.
+/// Starts a background task that records Tokio runtime gauges at the provided interval.
 ///
 /// This monitor must be started from within an active Tokio runtime because it
 /// uses [`tokio::runtime::Handle::current()`]. The underlying Tokio runtime
@@ -29,11 +29,12 @@ struct TokioRuntimeMetrics {
 /// # Arguments
 ///
 /// * `cancel_token` - Token that signals the task to stop collecting metrics.
+/// * `interval` - Delay between recording cycles.
 ///
 /// # Returns
 ///
 /// A join handle for the spawned background task.
-pub fn start_tokio_metrics_monitoring(
+pub(crate) fn start_tokio_metrics_monitoring(
     cancel_token: CancellationToken,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {

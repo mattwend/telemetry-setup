@@ -18,10 +18,11 @@ use tokio_util::sync::CancellationToken;
 /// providers. Dropping the guard without calling `shutdown` first performs a
 /// best-effort fallback that cancels the token and aborts any remaining tasks.
 ///
-/// When OTLP is enabled, provider shutdown is blocking. Drop avoids running
-/// that blocking shutdown path when the guard is dropped on an active Tokio
-/// runtime thread and logs a warning instead, which may skip final OTLP flushes.
-/// Prefer calling [`TelemetryGuard::shutdown`] explicitly during teardown.
+/// When OTLP is enabled, provider shutdown is blocking. During drop, the guard
+/// attempts to flush providers via `tokio::task::block_in_place` when dropped on
+/// a multi-thread Tokio runtime. On a current-thread runtime that fallback is
+/// unavailable, so drop emits a warning to stderr and may skip the final OTLP
+/// flush. Prefer calling [`TelemetryGuard::shutdown`] explicitly during teardown.
 #[must_use = "keep TelemetryGuard alive for the process lifetime, or call shutdown().await during teardown"]
 #[derive(Debug)]
 pub struct TelemetryGuard {
@@ -35,13 +36,6 @@ pub struct TelemetryGuard {
     /// Shared cancellation token used to signal shutdown to all background tasks.
     pub(crate) cancel_token: CancellationToken,
     pub(crate) background_tasks: Vec<tokio::task::JoinHandle<()>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DropShutdownBehavior {
-    SkipCompleted,
-    SkipOnRuntime,
-    ShutdownProviders,
 }
 
 impl TelemetryGuard {
@@ -66,9 +60,9 @@ impl TelemetryGuard {
     /// Requests graceful shutdown, waits for background tasks to finish, and
     /// then shuts down OTLP providers.
     ///
-    /// This is the preferred teardown path because it allows background tasks
-    /// to exit cleanly and performs OTLP provider shutdown outside the degraded
-    /// drop fallback.
+    /// This method is idempotent. After the first call starts shutdown, later
+    /// calls return `Ok(())` immediately and do not repeat task or provider
+    /// teardown.
     ///
     /// # Returns
     ///
@@ -80,11 +74,14 @@ impl TelemetryGuard {
     /// Returns [`crate::TelemetryError::BackgroundTask`] if a background task
     /// fails or is cancelled unexpectedly. Remaining tasks and providers are
     /// still shut down before the error is returned.
-    pub async fn shutdown(mut self) -> Result<(), crate::TelemetryError> {
+    pub async fn shutdown(&mut self) -> Result<(), crate::TelemetryError> {
+        if self.shutdown_completed.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+
         self.request_shutdown();
         let task_result = self.wait_for_background_tasks().await;
         self.shutdown_providers();
-        self.shutdown_completed.store(true, Ordering::Relaxed);
         task_result.map_err(crate::TelemetryError::background_task)
     }
 
@@ -123,20 +120,6 @@ impl TelemetryGuard {
         task.await
     }
 
-    /// Determines how drop should handle OTLP provider shutdown.
-    fn drop_shutdown_behavior(&self) -> DropShutdownBehavior {
-        if self.shutdown_completed.load(Ordering::Relaxed) {
-            return DropShutdownBehavior::SkipCompleted;
-        }
-
-        #[cfg(feature = "otlp")]
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return DropShutdownBehavior::SkipOnRuntime;
-        }
-
-        DropShutdownBehavior::ShutdownProviders
-    }
-
     /// Shuts down any configured OTLP providers.
     fn shutdown_providers(&mut self) {
         #[cfg(feature = "otlp")]
@@ -158,6 +141,25 @@ impl TelemetryGuard {
             }
         }
     }
+
+    /// Runs drop-time provider shutdown.
+    ///
+    /// When dropping on a multi-thread Tokio runtime, provider shutdown is run
+    /// inside `tokio::task::block_in_place` so exporter teardown can block
+    /// without stalling the async scheduler. Outside a Tokio runtime, shutdown
+    /// runs directly. On a current-thread runtime, `block_in_place` panics and
+    /// the caller can fall back to a stderr warning.
+    fn run_drop_shutdown(shutdown: impl FnOnce()) -> Result<(), ()> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            shutdown();
+            return Ok(());
+        }
+
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(shutdown);
+        }))
+        .map_err(|_| ())
+    }
 }
 
 impl Drop for TelemetryGuard {
@@ -170,14 +172,17 @@ impl Drop for TelemetryGuard {
             }
         }
 
-        match self.drop_shutdown_behavior() {
-            DropShutdownBehavior::SkipCompleted => {}
-            DropShutdownBehavior::SkipOnRuntime => {
-                tracing::warn!(
-                    "TelemetryGuard dropped before shutdown() completed; skipping blocking OTLP provider shutdown on an active Tokio runtime"
-                );
-            }
-            DropShutdownBehavior::ShutdownProviders => self.shutdown_providers(),
+        if self.shutdown_completed.load(Ordering::Relaxed) {
+            return;
+        }
+
+        if Self::run_drop_shutdown(|| self.shutdown_providers()).is_err() {
+            // The tracing subscriber may already be tearing down here, so emit
+            // this fallback warning directly to stderr instead of through
+            // `tracing`.
+            eprintln!(
+                "telemetry-setup: TelemetryGuard dropped without shutdown() on a current_thread runtime; OTLP providers were not flushed"
+            );
         }
     }
 }
@@ -190,7 +195,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
 
-    use super::{DropShutdownBehavior, TelemetryGuard};
+    use super::TelemetryGuard;
 
     #[tokio::test]
     async fn shutdown_cancels_token_and_awaits_background_task() {
@@ -208,6 +213,15 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(observed_cancel.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_idempotent() {
+        let cancel_token = CancellationToken::new();
+        let mut guard = TelemetryGuard::new(cancel_token);
+
+        assert!(guard.shutdown().await.is_ok());
+        assert!(guard.shutdown().await.is_ok());
     }
 
     #[tokio::test]
@@ -282,52 +296,28 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn drop_on_tokio_runtime_after_shutdown_does_not_abort_completed_task() {
-        let cancel_token = CancellationToken::new();
-        let (completed_sender, completed_receiver) = oneshot::channel();
-        let task_token = cancel_token.child_token();
-        let mut guard = TelemetryGuard::new(cancel_token);
-        guard.background_tasks.push(tokio::spawn(async move {
-            task_token.cancelled().await;
-            let _ = completed_sender.send(());
-        }));
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drop_shutdown_uses_block_in_place_on_multi_thread_runtime() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_shutdown = ran.clone();
 
-        let result = guard.shutdown().await;
+        let result = TelemetryGuard::run_drop_shutdown(move || {
+            ran_in_shutdown.store(true, Ordering::SeqCst);
+        });
 
         assert!(result.is_ok());
-        assert!(completed_receiver.await.is_ok());
+        assert!(ran.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn drop_shutdown_behavior_skips_provider_shutdown_after_graceful_shutdown() {
-        let guard = TelemetryGuard::new(CancellationToken::new());
-        guard.shutdown_completed.store(true, Ordering::Relaxed);
+    fn drop_shutdown_returns_error_on_current_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
-        assert_eq!(
-            guard.drop_shutdown_behavior(),
-            DropShutdownBehavior::SkipCompleted
-        );
-    }
+        let result = runtime.block_on(async { TelemetryGuard::run_drop_shutdown(|| {}) });
 
-    #[cfg(feature = "otlp")]
-    #[tokio::test]
-    async fn drop_shutdown_behavior_skips_provider_shutdown_on_tokio_runtime() {
-        let guard = TelemetryGuard::new(CancellationToken::new());
-
-        assert_eq!(
-            guard.drop_shutdown_behavior(),
-            DropShutdownBehavior::SkipOnRuntime
-        );
-    }
-
-    #[test]
-    fn drop_shutdown_behavior_shuts_down_providers_without_runtime() {
-        let guard = TelemetryGuard::new(CancellationToken::new());
-
-        assert_eq!(
-            guard.drop_shutdown_behavior(),
-            DropShutdownBehavior::ShutdownProviders
-        );
+        assert!(result.is_err());
     }
 }

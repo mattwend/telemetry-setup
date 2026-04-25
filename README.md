@@ -13,7 +13,7 @@ Opinionated shared telemetry setup for workspace Rust services.
 - optional OTLP export for traces, logs, and metrics
 - optional `journald` output
 - optional localhost-only log-level control API
-- optional Tokio runtime metrics exported through the OTLP/OpenTelemetry pipeline
+- optional Tokio runtime metrics exported through the OpenTelemetry global meter pipeline
 
 The API is intentionally small and opinionated.
 
@@ -46,9 +46,15 @@ same process is unsupported.
 
 For graceful shutdown, call `TelemetryGuard::shutdown().await` during teardown.
 Dropping the guard without calling `shutdown` first performs a best-effort fallback.
-When OTLP is enabled, provider shutdown is blocking, so drop avoids running that
-blocking shutdown path on an active Tokio runtime thread and may skip the final
-OTLP flush. Explicit shutdown during teardown is strongly preferred.
+When OTLP is enabled, drop attempts provider shutdown through
+`tokio::task::block_in_place` on a multi-thread Tokio runtime. This crate enables
+Tokio's `rt-multi-thread` feature to support that drop path. Consumers running a
+`current_thread`-only runtime should call `TelemetryGuard::shutdown().await`
+explicitly rather than relying on `Drop`. On a `current_thread` runtime the drop
+fallback is unavailable, so it emits a stderr warning and may skip the final
+OTLP flush. Explicit shutdown during teardown is strongly preferred so
+background tasks can finish and final telemetry can flush in a predictable
+order.
 
 ## Optional features
 
@@ -57,7 +63,7 @@ OTLP flush. Explicit shutdown during teardown is strongly preferred.
 - `journald`: `tracing-journald` output; use `TelemetryBuilder::enable_journald()`
 - `log-control`: HTTP endpoints on `127.0.0.1` for runtime filter changes;
   exposes `LogControlConfig` and `TelemetryBuilder::with_log_control(...)`
-- `tokio-metrics`: Tokio runtime gauges exported through OTLP/OpenTelemetry; implies `otlp`; use `TelemetryBuilder::enable_tokio_metrics()`
+- `tokio-metrics`: Tokio runtime gauges exported through OpenTelemetry; use `TelemetryBuilder::enable_tokio_metrics()`
 
 GreptimeDB export does not require a dedicated crate feature. Configure GreptimeDB
 OTLP headers explicitly through `OtlpConfig::headers`; see
@@ -69,9 +75,9 @@ This example assumes the `otlp`, `log-control`, `journald`, and
 `tokio-metrics` crate features are enabled.
 
 ```rust
-use std::collections::HashMap;
-use telemetry_setup::{LogControlConfig, OtlpConfig, OtlpHeadersConfig, TelemetryBuilder};
-
+# use std::collections::HashMap;
+# use telemetry_setup::{LogControlConfig, OtlpConfig, OtlpHeadersConfig, TelemetryBuilder};
+# fn example() -> Result<(), telemetry_setup::TelemetryError> {
 let _telemetry = TelemetryBuilder::new("controller")
     .with_stdout_filter("info")
     .with_otlp_config(OtlpConfig {
@@ -97,6 +103,8 @@ let _telemetry = TelemetryBuilder::new("controller")
     .enable_journald()
     .enable_tokio_metrics()
     .init()?;
+# Ok(())
+# }
 ```
 
 Defaults:
@@ -104,7 +112,8 @@ Defaults:
 - local filter comes from `RUST_LOG`, falling back to `info`
 - log-control port defaults to `6669`
 - OTLP defaults are local-first and target `http://localhost:4318` for OTLP/HTTP
-- OTLP metric export and Tokio runtime metric collection default to a 5 second interval and can be overridden with `OtlpConfig::metrics_interval`
+- OTLP metric export defaults to a 5 second interval and can be overridden with `OtlpConfig::metrics_interval` between 1 second and 1 day
+- Tokio runtime metric collection defaults to a 5 second interval and can be overridden with `TelemetryBuilder::with_tokio_metrics_interval(...)`
 
 ## Documentation and examples
 
@@ -121,10 +130,10 @@ Compilable example applications live in `examples/`:
 
 Notes:
 
-- Tokio metrics are OTLP-only and require both the `tokio-metrics` crate feature, the `otlp` feature, and an OTLP configuration at runtime
+- Tokio metrics require the `tokio-metrics` crate feature and any installed OpenTelemetry meter provider
 - Tokio metrics also require compiling the process with `RUSTFLAGS="--cfg tokio_unstable"`
 - call `TelemetryGuard::shutdown().await` to gracefully stop background tasks before OTLP providers are shut down so final telemetry can flush cleanly
-- dropping `TelemetryGuard` without calling `shutdown` first falls back to best-effort teardown and aborts any tasks that are still running
+- dropping `TelemetryGuard` without calling `shutdown` first falls back to best-effort teardown, aborts any tasks that are still running, and then attempts provider shutdown via `tokio::task::block_in_place` on multi-thread runtimes
 - the OTLP log rate limit is intentionally approximate at Unix-second boundaries under contention; it is a best-effort overload guard, not exact accounting
 - OTLP rate-limit warnings use at most one helper thread at a time to avoid spawning a new thread on every overflow transition during sustained overload
 - use `TelemetryBuilder::without_env_var()` when the process environment must not override the fallback stdout filter

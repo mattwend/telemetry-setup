@@ -52,7 +52,8 @@ pub struct OtlpConfig {
     pub headers: OtlpHeadersConfig,
     /// Interval between OTLP metric export cycles.
     ///
-    /// The default is five seconds.
+    /// The default is five seconds. Values must be between one second and one
+    /// day.
     #[serde(with = "duration_seconds")]
     pub metrics_interval: std::time::Duration,
 }
@@ -150,12 +151,46 @@ mod tests {
         assert_eq!(decoded.log_rate_limit_per_sec, None);
         assert_eq!(decoded.metrics_interval, std::time::Duration::from_secs(5));
     }
+
+    #[test]
+    fn otlp_config_rejects_zero_metrics_interval() {
+        let error = toml::from_str::<OtlpConfig>(
+            r#"
+            metrics_interval = 0
+            "#,
+        )
+        .expect_err("zero metrics interval must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("metrics_interval must be between 1 and 86400 seconds")
+        );
+    }
+
+    #[test]
+    fn otlp_config_rejects_excessive_metrics_interval() {
+        let error = toml::from_str::<OtlpConfig>(
+            r#"
+            metrics_interval = 86401
+            "#,
+        )
+        .expect_err("excessive metrics interval must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("metrics_interval must be between 1 and 86400 seconds")
+        );
+    }
 }
 
 mod duration_seconds {
     use std::time::Duration;
 
     use serde::{Deserialize, Deserializer, Serializer};
+
+    const MAX_METRICS_INTERVAL_SECONDS: u64 = 86_400;
 
     pub fn serialize<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -169,6 +204,11 @@ mod duration_seconds {
         D: Deserializer<'de>,
     {
         let seconds = u64::deserialize(deserializer)?;
+        if !(1..=MAX_METRICS_INTERVAL_SECONDS).contains(&seconds) {
+            return Err(serde::de::Error::custom(format!(
+                "metrics_interval must be between 1 and {MAX_METRICS_INTERVAL_SECONDS} seconds"
+            )));
+        }
         Ok(Duration::from_secs(seconds))
     }
 }
