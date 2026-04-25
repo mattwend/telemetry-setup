@@ -8,11 +8,21 @@
 ))]
 #[test]
 fn readme_common_configuration_compiles() {
+    let _ = compile_readme_common_configuration;
+}
+
+#[cfg(all(
+    feature = "otlp",
+    feature = "log-control",
+    feature = "journald",
+    feature = "tokio-metrics"
+))]
+fn compile_readme_common_configuration() -> Result<(), telemetry_setup::TelemetryError> {
     use std::collections::HashMap;
 
     use telemetry_setup::{LogControlConfig, OtlpConfig, OtlpHeadersConfig, TelemetryBuilder};
 
-    let _builder = TelemetryBuilder::new("controller")
+    let _telemetry = TelemetryBuilder::new("controller")
         .with_stdout_filter("info")
         .with_otlp_config(OtlpConfig {
             url: "http://localhost:4318".to_string(),
@@ -32,5 +42,8 @@ fn readme_common_configuration_compiles() {
         })
         .with_log_control(LogControlConfig { port: 6669 })
         .enable_journald()
-        .enable_tokio_metrics();
+        .enable_tokio_metrics()
+        .init()?;
+
+    Ok(())
 }

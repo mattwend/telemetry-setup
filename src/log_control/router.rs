@@ -6,7 +6,7 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use super::reload::{ReloadState, read_lock, write_lock};
+use super::reload::{ReloadState, clone_mutex_value};
 
 #[derive(Debug, Deserialize)]
 struct FilterUpdate {
@@ -39,8 +39,8 @@ pub(super) fn build_router(state: ReloadState) -> Router {
 /// Returns the current stdout and OTLP filter strings.
 async fn get_filters(State(state): State<ReloadState>) -> Json<FiltersResponse> {
     Json(FiltersResponse {
-        stdout: read_lock(&state.stdout_filter),
-        otlp: read_lock(&state.otlp_filter),
+        stdout: clone_mutex_value(&state.stdout_filter),
+        otlp: clone_mutex_value(&state.otlp_filter),
     })
 }
 
@@ -49,16 +49,20 @@ async fn update_stdout_filter(
     State(state): State<ReloadState>,
     Json(update): Json<FilterUpdate>,
 ) -> Result<Json<FiltersResponse>, (StatusCode, String)> {
-    let _guard = state
-        .stdout_update_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    (state.stdout_reload)(update.filter.clone())
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    write_lock(&state.stdout_filter, update.filter);
+    let stdout = {
+        let mut stdout_filter = state
+            .stdout_filter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (state.stdout_reload)(update.filter.clone())
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        *stdout_filter = update.filter;
+        stdout_filter.clone()
+    };
+
     Ok(Json(FiltersResponse {
-        stdout: read_lock(&state.stdout_filter),
-        otlp: read_lock(&state.otlp_filter),
+        stdout,
+        otlp: clone_mutex_value(&state.otlp_filter),
     }))
 }
 
@@ -74,15 +78,19 @@ async fn update_otlp_filter(
         ));
     };
 
-    let _guard = state
-        .otlp_update_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    reload(update.filter.clone()).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    write_lock(&state.otlp_filter, Some(update.filter));
+    let otlp = {
+        let mut otlp_filter = state
+            .otlp_filter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reload(update.filter.clone()).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        *otlp_filter = Some(update.filter);
+        otlp_filter.clone()
+    };
+
     Ok(Json(FiltersResponse {
-        stdout: read_lock(&state.stdout_filter),
-        otlp: read_lock(&state.otlp_filter),
+        stdout: clone_mutex_value(&state.stdout_filter),
+        otlp,
     }))
 }
 

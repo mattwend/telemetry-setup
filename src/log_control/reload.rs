@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use std::sync::{Arc, Mutex, RwLock};
-
-use tracing_subscriber::filter::EnvFilter;
-
-use crate::builder::layers::FilterReloadHandle;
+use std::sync::{Arc, Mutex};
 
 pub(crate) type ReloadCallback = Arc<dyn Fn(String) -> Result<(), String> + Send + Sync>;
 
@@ -12,13 +8,9 @@ pub(crate) type ReloadCallback = Arc<dyn Fn(String) -> Result<(), String> + Send
 /// Shared state used by the runtime log-control HTTP server.
 pub(crate) struct ReloadState {
     /// The currently active local stdout and journald filter string.
-    pub stdout_filter: Arc<RwLock<String>>,
-    /// Serializes stdout filter reloads with state updates.
-    pub stdout_update_lock: Arc<Mutex<()>>,
+    pub stdout_filter: Arc<Mutex<String>>,
     /// The currently active OTLP filter string, when OTLP export is enabled.
-    pub otlp_filter: Arc<RwLock<Option<String>>>,
-    /// Serializes OTLP filter reloads with state updates.
-    pub otlp_update_lock: Arc<Mutex<()>>,
+    pub otlp_filter: Arc<Mutex<Option<String>>>,
     /// Callback used to reload the local stdout and journald filter domain.
     pub stdout_reload: ReloadCallback,
     /// Callback used to reload OTLP trace and log filters.
@@ -45,10 +37,8 @@ impl ReloadState {
         otlp_reload: Option<ReloadCallback>,
     ) -> Self {
         Self {
-            stdout_filter: Arc::new(RwLock::new(stdout_filter)),
-            stdout_update_lock: Arc::new(Mutex::new(())),
-            otlp_filter: Arc::new(RwLock::new(otlp_filter)),
-            otlp_update_lock: Arc::new(Mutex::new(())),
+            stdout_filter: Arc::new(Mutex::new(stdout_filter)),
+            otlp_filter: Arc::new(Mutex::new(otlp_filter)),
             stdout_reload,
             otlp_reload,
         }
@@ -59,30 +49,21 @@ impl ReloadState {
 ///
 /// # Arguments
 ///
-/// * `fmt_filter_handle` - Reload handle for the stdout formatting layer.
-/// * `journald_reload_handle` - Optional reload handle for the journald layer.
+/// * `fmt_reload` - Callback for the stdout formatting layer.
+/// * `journald_reload` - Optional callback for the journald layer.
 ///
 /// # Returns
 ///
 /// A callback suitable for [`ReloadState::stdout_reload`].
 pub(crate) fn stdout_reload_callback(
-    fmt_filter_handle: FilterReloadHandle,
-    journald_reload_handle: Option<FilterReloadHandle>,
+    fmt_reload: ReloadCallback,
+    journald_reload: Option<ReloadCallback>,
 ) -> ReloadCallback {
     Arc::new(move |spec: String| {
-        let fmt_filter = EnvFilter::try_new(spec.as_str()).map_err(|error| error.to_string())?;
-        let journald_filter = if journald_reload_handle.is_some() {
-            Some(EnvFilter::try_new(spec.as_str()).map_err(|error| error.to_string())?)
-        } else {
-            None
-        };
+        fmt_reload(spec.clone())?;
 
-        fmt_filter_handle
-            .reload(fmt_filter)
-            .map_err(|error| error.to_string())?;
-
-        if let (Some(handle), Some(filter)) = (journald_reload_handle.clone(), journald_filter) {
-            handle.reload(filter).map_err(|error| error.to_string())?;
+        if let Some(reload) = &journald_reload {
+            reload(spec)?;
         }
 
         Ok(())
@@ -93,78 +74,61 @@ pub(crate) fn stdout_reload_callback(
 ///
 /// # Arguments
 ///
-/// * `trace_handle` - Optional reload handle for the OTLP trace layer.
-/// * `log_handle` - Optional reload handle for the OTLP log layer.
+/// * `trace_reload` - Optional callback for the OTLP trace layer.
+/// * `log_reload` - Optional callback for the OTLP log layer.
 ///
 /// # Returns
 ///
 /// A callback when both handles are present, or `None` when OTLP filtering is disabled.
 #[cfg(feature = "otlp")]
 pub(crate) fn otlp_reload_callback(
-    trace_handle: Option<FilterReloadHandle>,
-    log_handle: Option<FilterReloadHandle>,
+    trace_reload: Option<ReloadCallback>,
+    log_reload: Option<ReloadCallback>,
 ) -> Option<ReloadCallback> {
-    match (trace_handle, log_handle) {
-        (Some(trace_handle), Some(log_handle)) => Some(Arc::new(move |spec: String| {
-            let trace_filter =
-                EnvFilter::try_new(spec.as_str()).map_err(|error| error.to_string())?;
-            let log_filter =
-                EnvFilter::try_new(spec.as_str()).map_err(|error| error.to_string())?;
-            trace_handle
-                .reload(trace_filter)
-                .map_err(|error| error.to_string())?;
-            log_handle
-                .reload(log_filter)
-                .map_err(|error| error.to_string())?;
+    match (trace_reload, log_reload) {
+        (Some(trace_reload), Some(log_reload)) => Some(Arc::new(move |spec: String| {
+            trace_reload(spec.clone())?;
+            log_reload(spec)?;
             Ok(())
         })),
         _ => None,
     }
 }
 
-/// Reads the current value from `lock`, tolerating poisoned locks.
-pub(super) fn read_lock<T: Clone>(lock: &RwLock<T>) -> T {
-    match lock.read() {
+/// Clones the current value from `lock`, tolerating poisoned locks.
+pub(super) fn clone_mutex_value<T: Clone>(lock: &Mutex<T>) -> T {
+    match lock.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 
-/// Writes `value` into `lock`, tolerating poisoned locks.
-pub(super) fn write_lock<T>(lock: &RwLock<T>, value: T) {
-    match lock.write() {
-        Ok(mut guard) => *guard = value,
-        Err(poisoned) => *poisoned.into_inner() = value,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::RwLock;
+    use std::sync::Mutex;
 
     use tracing_subscriber::filter::EnvFilter;
 
-    use super::{read_lock, stdout_reload_callback, write_lock};
+    use super::{clone_mutex_value, stdout_reload_callback};
 
-    fn reload_handle() -> super::FilterReloadHandle {
-        let (layer, handle) = crate::builder::layers::build_fmt_layer(EnvFilter::new("info"));
-        // The reload handle points back to its layer. Keep the layer alive for
-        // the duration of the process so callback tests exercise successful
-        // reloads rather than `SubscriberGone` errors.
-        let _leaked_layer: &'static _ = Box::leak(layer);
-        handle
+    fn reload_callback() -> super::ReloadCallback {
+        let (layer, reload) = crate::builder::layers::build_fmt_layer::<tracing_subscriber::Registry>(
+            EnvFilter::new("info"),
+        );
+        let _leaked_layer: &'static _ = Box::leak(Box::new(layer));
+        reload
     }
 
     #[test]
     fn stdout_reload_callback_reloads_stdout_and_journald_filters() {
-        let callback = stdout_reload_callback(reload_handle(), Some(reload_handle()));
+        let callback = stdout_reload_callback(reload_callback(), Some(reload_callback()));
 
         assert!(callback("debug".to_string()).is_ok());
     }
 
     #[test]
     fn stdout_reload_callback_reports_malformed_filters() {
-        let callback = stdout_reload_callback(reload_handle(), Some(reload_handle()));
+        let callback = stdout_reload_callback(reload_callback(), Some(reload_callback()));
 
         let error = callback("[".to_string()).unwrap_err();
 
@@ -174,8 +138,9 @@ mod tests {
     #[cfg(feature = "otlp")]
     #[test]
     fn otlp_reload_callback_reloads_trace_and_log_filters() {
-        let callback = super::otlp_reload_callback(Some(reload_handle()), Some(reload_handle()))
-            .expect("both handles should create callback");
+        let callback =
+            super::otlp_reload_callback(Some(reload_callback()), Some(reload_callback()))
+                .expect("both handles should create callback");
 
         assert!(callback("debug".to_string()).is_ok());
     }
@@ -183,8 +148,9 @@ mod tests {
     #[cfg(feature = "otlp")]
     #[test]
     fn otlp_reload_callback_reports_malformed_filters() {
-        let callback = super::otlp_reload_callback(Some(reload_handle()), Some(reload_handle()))
-            .expect("both handles should create callback");
+        let callback =
+            super::otlp_reload_callback(Some(reload_callback()), Some(reload_callback()))
+                .expect("both handles should create callback");
 
         let error = callback("[".to_string()).unwrap_err();
 
@@ -192,27 +158,13 @@ mod tests {
     }
 
     #[test]
-    fn read_lock_recovers_value_from_poisoned_lock() {
-        let lock = RwLock::new("info".to_string());
+    fn clone_mutex_value_recovers_value_from_poisoned_lock() {
+        let lock = Mutex::new("info".to_string());
         let _ = std::panic::catch_unwind(|| {
-            let _guard = lock.write().unwrap();
+            let _guard = lock.lock().unwrap();
             panic!("poison lock");
         });
 
-        assert_eq!(read_lock(&lock), "info");
-    }
-
-    #[test]
-    fn write_lock_recovers_and_updates_poisoned_lock() {
-        let lock = RwLock::new("info".to_string());
-        let _ = std::panic::catch_unwind(|| {
-            let mut guard = lock.write().unwrap();
-            *guard = "warn".to_string();
-            panic!("poison lock");
-        });
-
-        write_lock(&lock, "debug".to_string());
-
-        assert_eq!(read_lock(&lock), "debug");
+        assert_eq!(clone_mutex_value(&lock), "info");
     }
 }

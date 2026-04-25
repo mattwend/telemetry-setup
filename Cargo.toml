@@ -73,3 +73,7 @@ required-features = ["otlp"]
 [[test]]
 name = "init_log_control"
 required-features = ["log-control"]
+
+[[test]]
+name = "init_otlp_log_control"
+required-features = ["otlp", "log-control"]

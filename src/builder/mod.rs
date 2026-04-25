@@ -77,8 +77,14 @@ struct InitializedOtlpProviders {
 #[cfg(feature = "log-control")]
 struct LogControlParts {
     stdout_reload: StdoutReload,
+    otlp_reload: Option<crate::log_control::ReloadCallback>,
+}
+
+struct InstalledSubscriber {
     #[cfg(feature = "otlp")]
-    otlp_reload: OtlpReload,
+    providers: Option<InitializedOtlpProviders>,
+    #[cfg(feature = "log-control")]
+    log_control: LogControlParts,
 }
 
 impl std::fmt::Debug for TelemetryBuilder {
@@ -283,17 +289,14 @@ impl TelemetryBuilder {
         #[cfg(all(feature = "log-control", not(feature = "otlp")))]
         let otlp_current = None;
 
-        #[cfg(feature = "otlp")]
-        let installed_otlp = self.install_subscriber(stdout_filter, stdout_spec.as_str())?;
-        #[cfg(not(feature = "otlp"))]
-        self.install_subscriber(stdout_filter, stdout_spec.as_str())?;
+        let _installed = self.install_subscriber(stdout_filter, stdout_spec.as_str())?;
 
         let cancel_token = CancellationToken::new();
         #[allow(unused_mut)]
         let mut guard = TelemetryGuard::new(cancel_token);
 
         #[cfg(feature = "otlp")]
-        if let Some(providers) = installed_otlp.providers {
+        if let Some(providers) = _installed.providers {
             guard.tracer_provider = Some(providers.tracer_provider);
             guard.logger_provider = Some(providers.logger_provider);
             guard.meter_provider = Some(providers.meter_provider);
@@ -313,17 +316,8 @@ impl TelemetryBuilder {
             let state = ReloadState::new(
                 stdout_spec,
                 otlp_current,
-                installed_otlp.log_control.stdout_reload,
-                {
-                    #[cfg(feature = "otlp")]
-                    {
-                        installed_otlp.log_control.otlp_reload
-                    }
-                    #[cfg(not(feature = "otlp"))]
-                    {
-                        None
-                    }
-                },
+                _installed.log_control.stdout_reload,
+                _installed.log_control.otlp_reload,
             );
             let task = spawn_log_control_server(config, state, guard.cancel_token.child_token())?;
             guard.background_tasks.push(task);
@@ -332,7 +326,6 @@ impl TelemetryBuilder {
         Ok(guard)
     }
 
-    #[cfg(feature = "otlp")]
     fn install_subscriber(
         &self,
         stdout_filter: EnvFilter,
@@ -352,34 +345,16 @@ impl TelemetryBuilder {
         }
     }
 
-    #[cfg(not(feature = "otlp"))]
-    fn install_subscriber(
-        &self,
-        stdout_filter: EnvFilter,
-        _stdout_spec: &str,
-    ) -> Result<(), TelemetryError> {
-        if self.enable_journald {
-            #[cfg(feature = "journald")]
-            {
-                self.install_with_journald(stdout_filter, _stdout_spec)
-            }
-            #[cfg(not(feature = "journald"))]
-            unreachable!("journald feature checked before subscriber installation")
-        } else {
-            self.install_without_journald(stdout_filter)
-        }
-    }
-
     #[cfg(all(feature = "otlp", feature = "journald"))]
     fn install_with_journald(
         &self,
         stdout_filter: EnvFilter,
         stdout_spec: &str,
     ) -> Result<InstalledSubscriber, TelemetryError> {
-        let (fmt_layer, fmt_reload_or_unit) =
+        let (fmt_layer, _fmt_reload_or_unit) =
             layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
         let subscriber = tracing_subscriber::registry().with(fmt_layer);
-        let (journald_layer, journald_reload_or_unit) =
+        let (journald_layer, _journald_reload_or_unit) =
             layers::build_journald_layer::<_>(stdout_spec)?;
         let subscriber = subscriber.with(journald_layer);
 
@@ -389,14 +364,11 @@ impl TelemetryBuilder {
             #[cfg(feature = "log-control")]
             let log_control = LogControlParts {
                 stdout_reload: stdout_reload_callback(
-                    fmt_reload_or_unit,
-                    Some(journald_reload_or_unit),
+                    _fmt_reload_or_unit,
+                    Some(_journald_reload_or_unit),
                 ),
                 otlp_reload: installed_otlp.otlp_reload,
             };
-
-            #[cfg(not(feature = "log-control"))]
-            let _ = (fmt_reload_or_unit, journald_reload_or_unit);
 
             Ok(InstalledSubscriber {
                 providers: installed_otlp.providers,
@@ -409,8 +381,8 @@ impl TelemetryBuilder {
             #[cfg(feature = "log-control")]
             let log_control = LogControlParts {
                 stdout_reload: stdout_reload_callback(
-                    fmt_reload_or_unit,
-                    Some(journald_reload_or_unit),
+                    _fmt_reload_or_unit,
+                    Some(_journald_reload_or_unit),
                 ),
                 otlp_reload: None,
             };
@@ -428,11 +400,11 @@ impl TelemetryBuilder {
         &self,
         stdout_filter: EnvFilter,
         stdout_spec: &str,
-    ) -> Result<(), TelemetryError> {
-        let (fmt_layer, fmt_reload_or_unit) =
+    ) -> Result<InstalledSubscriber, TelemetryError> {
+        let (fmt_layer, _fmt_reload_or_unit) =
             layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
         let subscriber = tracing_subscriber::registry().with(fmt_layer);
-        let (journald_layer, journald_reload_or_unit) =
+        let (journald_layer, _journald_reload_or_unit) =
             layers::build_journald_layer::<_>(stdout_spec)?;
         subscriber
             .with(journald_layer)
@@ -440,11 +412,20 @@ impl TelemetryBuilder {
             .map_err(TelemetryError::subscriber)?;
 
         #[cfg(feature = "log-control")]
-        {
-            let _ = stdout_reload_callback(fmt_reload_or_unit, Some(journald_reload_or_unit));
-        }
+        let log_control = LogControlParts {
+            stdout_reload: stdout_reload_callback(
+                _fmt_reload_or_unit,
+                Some(_journald_reload_or_unit),
+            ),
+            otlp_reload: None,
+        };
 
-        Ok(())
+        Ok(InstalledSubscriber {
+            #[cfg(feature = "otlp")]
+            providers: None,
+            #[cfg(feature = "log-control")]
+            log_control,
+        })
     }
 
     #[cfg(feature = "otlp")]
@@ -452,19 +433,16 @@ impl TelemetryBuilder {
         &self,
         stdout_filter: EnvFilter,
     ) -> Result<InstalledSubscriber, TelemetryError> {
-        let (fmt_layer, fmt_reload_or_unit) =
+        let (fmt_layer, _fmt_reload_or_unit) =
             layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
         let subscriber = tracing_subscriber::registry().with(fmt_layer);
-
-        #[cfg(not(feature = "log-control"))]
-        let _ = fmt_reload_or_unit;
 
         if let Some(otlp_config) = self.otlp_config.as_ref() {
             let installed_otlp = self.install_otlp_layers(subscriber, otlp_config)?;
 
             #[cfg(feature = "log-control")]
             let log_control = LogControlParts {
-                stdout_reload: stdout_reload_callback(fmt_reload_or_unit, None),
+                stdout_reload: stdout_reload_callback(_fmt_reload_or_unit, None),
                 otlp_reload: installed_otlp.otlp_reload,
             };
 
@@ -478,7 +456,7 @@ impl TelemetryBuilder {
 
             #[cfg(feature = "log-control")]
             let log_control = LogControlParts {
-                stdout_reload: stdout_reload_callback(fmt_reload_or_unit, None),
+                stdout_reload: stdout_reload_callback(_fmt_reload_or_unit, None),
                 otlp_reload: None,
             };
 
@@ -491,7 +469,10 @@ impl TelemetryBuilder {
     }
 
     #[cfg(not(feature = "otlp"))]
-    fn install_without_journald(&self, stdout_filter: EnvFilter) -> Result<(), TelemetryError> {
+    fn install_without_journald(
+        &self,
+        stdout_filter: EnvFilter,
+    ) -> Result<InstalledSubscriber, TelemetryError> {
         let (fmt_layer, _fmt_reload_or_unit) =
             layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
         tracing_subscriber::registry()
@@ -500,11 +481,17 @@ impl TelemetryBuilder {
             .map_err(TelemetryError::subscriber)?;
 
         #[cfg(feature = "log-control")]
-        {
-            let _ = stdout_reload_callback(_fmt_reload_or_unit, None);
-        }
+        let log_control = LogControlParts {
+            stdout_reload: stdout_reload_callback(_fmt_reload_or_unit, None),
+            otlp_reload: None,
+        };
 
-        Ok(())
+        Ok(InstalledSubscriber {
+            #[cfg(feature = "otlp")]
+            providers: None,
+            #[cfg(feature = "log-control")]
+            log_control,
+        })
     }
 
     #[cfg(feature = "otlp")]
@@ -520,19 +507,27 @@ impl TelemetryBuilder {
             + Sync
             + 'static,
     {
-        let layers::OtlpLayerParts {
-            providers,
-            #[cfg(feature = "log-control")]
-            trace_reload,
-            #[cfg(feature = "log-control")]
-            log_reload,
-        } = layers::build_otlp_parts(&self.service_name, otlp_config)?;
+        let layers::OtlpLayerParts { providers } =
+            layers::build_otlp_parts(&self.service_name, otlp_config)?;
 
+        #[cfg(feature = "log-control")]
+        let (trace_layer, trace_reload) = layers::build_otlp_trace_layer::<_>(
+            &providers.tracer_provider,
+            otlp_config.log_level.as_str(),
+        )?;
+        #[cfg(not(feature = "log-control"))]
         let trace_layer = layers::build_otlp_trace_layer::<_>(
             &providers.tracer_provider,
             otlp_config.log_level.as_str(),
         )?;
         let subscriber = subscriber.with(trace_layer);
+        #[cfg(feature = "log-control")]
+        let (log_layer, log_reload) = layers::build_otlp_log_layer::<_>(
+            &providers.logger_provider,
+            otlp_config.log_level.as_str(),
+            otlp_config.log_rate_limit_per_sec,
+        )?;
+        #[cfg(not(feature = "log-control"))]
         let log_layer = layers::build_otlp_log_layer::<_>(
             &providers.logger_provider,
             otlp_config.log_level.as_str(),
@@ -565,13 +560,6 @@ struct InstalledOtlp {
     providers: Option<InitializedOtlpProviders>,
     #[cfg(feature = "log-control")]
     otlp_reload: OtlpReload,
-}
-
-#[cfg(feature = "otlp")]
-struct InstalledSubscriber {
-    providers: Option<InitializedOtlpProviders>,
-    #[cfg(feature = "log-control")]
-    log_control: LogControlParts,
 }
 
 #[cfg(test)]

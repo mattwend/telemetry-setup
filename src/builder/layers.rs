@@ -4,9 +4,10 @@
 //! [`TelemetryBuilder::init`](crate::TelemetryBuilder::init).
 //!
 //! Every helper returns its layer with concrete `impl Layer<S>` types so the
-//! subscriber can be composed via static `.with(...)` calls in `init()`. Each
-//! filter is wrapped in a [`tracing_subscriber::reload::Layer`] so log-control
-//! can update the active filter at runtime.
+//! subscriber can be composed via static `.with(...)` calls in `init()`. When
+//! runtime log control is enabled, helpers that expose mutable filters wrap
+//! those filters in [`tracing_subscriber::reload::Layer`] so the active filter
+//! can be updated at runtime.
 
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
@@ -115,20 +116,14 @@ where
     Ok((layer, ()))
 }
 
-/// Built OTLP providers and optional reload callbacks.
+/// Built OTLP providers.
 #[cfg(feature = "otlp")]
 pub(crate) struct OtlpLayerParts {
     /// Providers backing the OTLP layers; kept alive by the guard.
     pub providers: crate::otlp::BuiltProviders,
-    /// Callback that reloads the trace layer filter.
-    #[cfg(feature = "log-control")]
-    pub trace_reload: ReloadCallback,
-    /// Callback that reloads the log layer filter.
-    #[cfg(feature = "log-control")]
-    pub log_reload: ReloadCallback,
 }
 
-/// Builds OTLP providers and reload callbacks.
+/// Builds OTLP providers.
 ///
 /// # Arguments
 ///
@@ -137,12 +132,11 @@ pub(crate) struct OtlpLayerParts {
 ///
 /// # Returns
 ///
-/// Constructed OTLP providers and optional log-control callbacks.
+/// Constructed OTLP providers.
 ///
 /// # Errors
 ///
-/// Returns [`TelemetryError`] when providers cannot be built or filters cannot
-/// be parsed.
+/// Returns [`TelemetryError`] when providers cannot be built.
 #[cfg(feature = "otlp")]
 pub(crate) fn build_otlp_parts(
     service_name: &str,
@@ -150,22 +144,36 @@ pub(crate) fn build_otlp_parts(
 ) -> Result<OtlpLayerParts, TelemetryError> {
     let providers = crate::otlp::build_providers(service_name, otlp_config)?;
 
-    #[cfg(feature = "log-control")]
-    let trace_reload = build_env_filter_callback(otlp_config.log_level.as_str())?;
-    #[cfg(feature = "log-control")]
-    let log_reload = build_env_filter_callback(otlp_config.log_level.as_str())?;
-
-    Ok(OtlpLayerParts {
-        providers,
-        #[cfg(feature = "log-control")]
-        trace_reload,
-        #[cfg(feature = "log-control")]
-        log_reload,
-    })
+    Ok(OtlpLayerParts { providers })
 }
 
 /// Builds the OTLP trace export layer for subscriber `S`.
-#[cfg(feature = "otlp")]
+#[cfg(all(feature = "otlp", feature = "log-control"))]
+pub(crate) fn build_otlp_trace_layer<S>(
+    tracer_provider: &opentelemetry_sdk::trace::SdkTracerProvider,
+    filter_spec: &str,
+) -> Result<(impl Layer<S> + Send + Sync + 'static, ReloadCallback), TelemetryError>
+where
+    S: tracing::Subscriber
+        + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>
+        + Send
+        + Sync
+        + 'static,
+{
+    use opentelemetry::trace::TracerProvider;
+
+    let trace_filter = EnvFilter::try_new(filter_spec).map_err(TelemetryError::subscriber)?;
+    let (filter_layer, filter_handle) = reload::Layer::new(trace_filter);
+    let tracer = tracer_provider.tracer("telemetry-setup");
+    let layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(filter_layer);
+    let reload = build_reload_callback(filter_handle);
+    Ok((layer, reload))
+}
+
+/// Builds the OTLP trace export layer for subscriber `S`.
+#[cfg(all(feature = "otlp", not(feature = "log-control")))]
 pub(crate) fn build_otlp_trace_layer<S>(
     tracer_provider: &opentelemetry_sdk::trace::SdkTracerProvider,
     filter_spec: &str,
@@ -187,7 +195,34 @@ where
 }
 
 /// Builds the OTLP log export layer for subscriber `S`.
-#[cfg(feature = "otlp")]
+#[cfg(all(feature = "otlp", feature = "log-control"))]
+pub(crate) fn build_otlp_log_layer<S>(
+    logger_provider: &opentelemetry_sdk::logs::SdkLoggerProvider,
+    filter_spec: &str,
+    rate_limit_per_sec: Option<u64>,
+) -> Result<(impl Layer<S> + Send + Sync + 'static, ReloadCallback), TelemetryError>
+where
+    S: tracing::Subscriber
+        + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>
+        + Send
+        + Sync
+        + 'static,
+{
+    use tracing_subscriber::filter::FilterExt;
+
+    let log_filter = EnvFilter::try_new(filter_spec).map_err(TelemetryError::subscriber)?;
+    let (filter_layer, filter_handle) = reload::Layer::new(log_filter);
+    let layer =
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(logger_provider)
+            .with_filter(filter_layer.and(crate::otlp::RateLimitFilter::new_optional(
+                rate_limit_per_sec,
+            )));
+    let reload = build_reload_callback(filter_handle);
+    Ok((layer, reload))
+}
+
+/// Builds the OTLP log export layer for subscriber `S`.
+#[cfg(all(feature = "otlp", not(feature = "log-control")))]
 pub(crate) fn build_otlp_log_layer<S>(
     logger_provider: &opentelemetry_sdk::logs::SdkLoggerProvider,
     filter_spec: &str,
@@ -223,12 +258,4 @@ where
             .reload(filter)
             .map_err(|error| TelemetryError::subscriber(error).to_string())
     })
-}
-
-#[cfg(feature = "log-control")]
-fn build_env_filter_callback(initial_spec: &str) -> Result<ReloadCallback, TelemetryError> {
-    let initial_filter = EnvFilter::try_new(initial_spec).map_err(TelemetryError::subscriber)?;
-    let (_layer, reload_handle) =
-        reload::Layer::<EnvFilter, tracing_subscriber::Registry>::new(initial_filter);
-    Ok(build_reload_callback(reload_handle))
 }
