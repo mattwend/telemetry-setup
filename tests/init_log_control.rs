@@ -5,11 +5,10 @@ use std::net::{TcpListener, TcpStream};
 
 use telemetry_setup::{LogControlConfig, TelemetryBuilder};
 
-fn free_port() -> u16 {
+fn reserve_port() -> (TcpListener, u16) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = listener.local_addr().expect("read local addr").port();
-    drop(listener);
-    port
+    (listener, port)
 }
 
 async fn raw_http_request(port: u16, request: String) -> String {
@@ -47,7 +46,9 @@ async fn raw_http_put_json(port: u16, path: &str, body: &str) -> String {
 
 #[tokio::test]
 async fn log_control_server_accepts_filter_update_after_init() {
-    let port = free_port();
+    let (reserved_listener, port) = reserve_port();
+    drop(reserved_listener);
+
     let mut guard = TelemetryBuilder::new("test-lc")
         .without_env_var()
         .with_stdout_filter("info")

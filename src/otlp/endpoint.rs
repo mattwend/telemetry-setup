@@ -15,7 +15,8 @@ pub(super) fn signal_endpoint(
 ) -> Result<String, TelemetryError> {
     let parsed =
         Url::parse(base_url).map_err(|error| TelemetryError::otlp_endpoint(signal, error))?;
-    if parsed.path().ends_with(suffix) {
+    let expected_suffix = format!("/{suffix}");
+    if parsed.path().ends_with(&expected_suffix) {
         return Ok(base_url.to_string());
     }
 

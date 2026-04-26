@@ -7,7 +7,7 @@ Opinionated telemetry setup for Rust services.
 
 ## What it does
 
-`telemetry` provides a small builder for the telemetry setup we want by default:
+`telemetry-setup` provides a small builder for the telemetry setup we want by default:
 
 - formatted local `tracing` logs to stdout
 - optional OTLP export for traces, logs, and metrics
@@ -63,7 +63,7 @@ order.
 - `journald`: `tracing-journald` output; use `TelemetryBuilder::enable_journald()`
 - `log-control`: HTTP endpoints on `127.0.0.1` for runtime filter changes;
   exposes `LogControlConfig` and `TelemetryBuilder::with_log_control(...)`
-- `tokio-metrics`: Tokio runtime gauges exported through OpenTelemetry; use `TelemetryBuilder::enable_tokio_metrics()`
+- `tokio-metrics`: Tokio runtime gauges recorded through the OpenTelemetry global meter; use `TelemetryBuilder::enable_tokio_metrics()`
 
 GreptimeDB export does not require a dedicated crate feature. Configure GreptimeDB
 OTLP headers explicitly through `OtlpConfig::headers`; see
@@ -130,7 +130,9 @@ Compilable example applications live in `examples/`:
 
 Notes:
 
-- Tokio metrics require the `tokio-metrics` crate feature and any installed OpenTelemetry meter provider
+- Tokio metrics require the `tokio-metrics` crate feature and an installed OpenTelemetry global meter provider
+- enabling `TelemetryBuilder::enable_tokio_metrics()` without installing a meter provider records into OpenTelemetry's default no-op global meter
+- this crate installs a global meter provider when OTLP is enabled; without OTLP, consumers must install their own meter provider if they want Tokio runtime metrics exported anywhere
 - Tokio metrics also require compiling the process with `RUSTFLAGS="--cfg tokio_unstable"`
 - call `TelemetryGuard::shutdown().await` to gracefully stop background tasks before OTLP providers are shut down so final telemetry can flush cleanly
 - dropping `TelemetryGuard` without calling `shutdown` first falls back to best-effort teardown, aborts any tasks that are still running, and then attempts provider shutdown via `tokio::task::block_in_place` on multi-thread runtimes
