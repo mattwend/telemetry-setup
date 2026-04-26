@@ -56,13 +56,14 @@
 //! - `otlp`: OTLP trace, log, and metric export.
 //! - `journald`: `tracing-journald` output.
 //! - `log-control`: localhost-only runtime filter update endpoints.
-//! - `tokio-metrics`: Tokio runtime gauges exported through OpenTelemetry.
+//! - `tokio-metrics`: Tokio runtime gauges recorded through the OpenTelemetry global meter.
 //!
 //! # Prerequisites
 //!
-//! When enabling the `tokio-metrics` feature, compile the consuming process
-//! with `RUSTFLAGS="--cfg tokio_unstable"`. Tokio exposes the runtime metrics
-//! used by this crate only behind that cfg.
+//! Tokio runtime metrics are recorded through the OpenTelemetry global meter.
+//! This crate installs a global meter provider when `otlp` is enabled. Without
+//! `otlp`, consumers must install their own global meter provider or the metrics
+//! will be recorded into OpenTelemetry's default no-op meter.
 //!
 //! # Examples
 //!

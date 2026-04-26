@@ -18,10 +18,7 @@ struct TokioRuntimeMetrics {
 /// Starts a background task that records Tokio runtime gauges at the provided interval.
 ///
 /// This monitor must be started from within an active Tokio runtime because it
-/// uses [`tokio::runtime::Handle::current()`]. The underlying Tokio runtime
-/// metrics APIs also require compiling the process with
-/// `RUSTFLAGS="--cfg tokio_unstable"` when the `tokio-metrics` crate feature is
-/// enabled.
+/// uses [`tokio::runtime::Handle::current()`].
 ///
 /// The task runs until `cancel_token` is cancelled. The returned join handle
 /// tracks the task lifetime.
@@ -43,7 +40,7 @@ pub(crate) fn start_tokio_metrics_monitoring(
 
 /// Starts a Tokio metrics task with a caller-provided recording interval.
 ///
-/// This helper has the same runtime and `tokio_unstable` requirements as
+/// This helper has the same runtime requirements as
 /// [`start_tokio_metrics_monitoring`].
 ///
 /// # Arguments
@@ -74,9 +71,6 @@ fn start_tokio_metrics_monitoring_with_interval(
 }
 
 /// Runs the Tokio metrics collection loop until cancelled.
-///
-/// This loop assumes it is executing on a Tokio runtime whose metrics are
-/// available via `tokio_unstable`.
 ///
 /// # Arguments
 ///
@@ -109,9 +103,6 @@ async fn run_tokio_metrics_monitoring<F>(
 }
 
 /// Collects the current Tokio runtime metrics from `handle`.
-///
-/// Tokio exposes these runtime metrics only when the process is compiled with
-/// `RUSTFLAGS="--cfg tokio_unstable"`.
 ///
 /// # Arguments
 ///

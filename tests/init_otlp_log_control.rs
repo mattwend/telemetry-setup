@@ -7,11 +7,10 @@ use std::time::Duration;
 use telemetry_setup::{LogControlConfig, OtlpConfig, TelemetryBuilder};
 use tracing::Level;
 
-fn free_port() -> u16 {
+fn reserve_port() -> (TcpListener, u16) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = listener.local_addr().expect("read local addr").port();
-    drop(listener);
-    port
+    (listener, port)
 }
 
 fn unused_local_url() -> String {
@@ -59,7 +58,9 @@ async fn raw_http_put_json(port: u16, path: &str, body: &str) -> String {
 
 #[tokio::test]
 async fn otlp_filter_update_reloads_live_filter_behavior() {
-    let port = free_port();
+    let (reserved_listener, port) = reserve_port();
+    drop(reserved_listener);
+
     let mut guard = TelemetryBuilder::new("test-otlp-log-control")
         .without_env_var()
         .with_stdout_filter("error")
