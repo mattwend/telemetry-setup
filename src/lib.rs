@@ -60,10 +60,6 @@
 //!
 //! # Prerequisites
 //!
-//! When enabling the `tokio-metrics` feature, compile the consuming process
-//! with `RUSTFLAGS="--cfg tokio_unstable"`. Tokio exposes the runtime metrics
-//! used by this crate only behind that cfg.
-//!
 //! Tokio runtime metrics are recorded through the OpenTelemetry global meter.
 //! This crate installs a global meter provider when `otlp` is enabled. Without
 //! `otlp`, consumers must install their own global meter provider or the metrics
