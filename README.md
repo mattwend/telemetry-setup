@@ -5,29 +5,7 @@
 
 Opinionated telemetry setup for Rust services.
 
-## What it does
-
-`telemetry-setup` provides a small builder for the telemetry setup we want by default:
-
-- formatted local `tracing` logs to stdout
-- optional OTLP export for traces, logs, and metrics
-- optional `journald` output
-- optional localhost-only log-level control API
-- optional Tokio runtime metrics exported through the OpenTelemetry global meter pipeline
-
-The API is intentionally small and opinionated.
-
-## Prerequisites
-
-If you enable the `tokio-metrics` feature, compile the consuming process with:
-
-```bash
-RUSTFLAGS="--cfg tokio_unstable"
-```
-
-Tokio exposes the runtime metrics APIs used by this crate only behind that cfg.
-
-## Usage
+## Quick start
 
 ```rust
 use telemetry_setup::TelemetryBuilder;
@@ -40,39 +18,42 @@ fn main() -> Result<(), telemetry_setup::TelemetryError> {
 }
 ```
 
-Keep the returned `TelemetryGuard` alive for the process lifetime.
-This initialization is process-global; calling `init()` more than once in the
-same process is unsupported.
+Keep the returned `TelemetryGuard` alive for the lifetime of the process:
 
-For graceful shutdown, call `TelemetryGuard::shutdown().await` during teardown.
-Dropping the guard without calling `shutdown` first performs a best-effort fallback.
-When OTLP is enabled, drop attempts provider shutdown through
-`tokio::task::block_in_place` on a multi-thread Tokio runtime. This crate enables
-Tokio's `rt-multi-thread` feature to support that drop path. Consumers running a
-`current_thread`-only runtime should call `TelemetryGuard::shutdown().await`
-explicitly rather than relying on `Drop`. On a `current_thread` runtime the drop
-fallback is unavailable, so it emits a stderr warning and may skip the final
-OTLP flush. Explicit shutdown during teardown is strongly preferred so
-background tasks can finish and final telemetry can flush in a predictable
-order.
+- call `TelemetryGuard::shutdown().await` during teardown for a clean flush
+- initialize telemetry once per process; calling `init()` more than once is unsupported
+- dropping the guard without calling `shutdown()` first is only a best-effort fallback
+- on multi-thread Tokio runtimes, drop attempts a final OTLP flush
+- on `current_thread` runtimes, OTLP flush-on-drop is unavailable because that path relies on `tokio::task::block_in_place`, so explicit shutdown is strongly preferred
 
-## Optional features
+This crate enables Tokio's `rt-multi-thread` feature to support the multi-thread drop path.
 
-- `otlp`: OTLP trace/log/metric export; exposes `OtlpConfig`,
-  `OtlpHeadersConfig`, and `TelemetryBuilder::with_otlp_config(...)`
-- `journald`: `tracing-journald` output; use `TelemetryBuilder::enable_journald()`
-- `log-control`: HTTP endpoints on `127.0.0.1` for runtime filter changes;
-  exposes `LogControlConfig` and `TelemetryBuilder::with_log_control(...)`
-- `tokio-metrics`: Tokio runtime gauges recorded through the OpenTelemetry global meter; use `TelemetryBuilder::enable_tokio_metrics()`
+## Prerequisites
 
-GreptimeDB export does not require a dedicated crate feature. Configure GreptimeDB
-OTLP headers explicitly through `OtlpConfig::headers`; see
-`examples/greptime_otlp.toml` and `examples/greptime_otlp.rs`.
+Tokio metrics require the `tokio-metrics` feature and an installed OpenTelemetry
+meter provider. With OTLP enabled, this crate installs one automatically.
+Without OTLP, consumers must install their own meter provider or Tokio metrics
+will record into OpenTelemetry's default no-op global meter.
 
-## Common configuration
+## Features
 
-This example assumes the `otlp`, `log-control`, `journald`, and
-`tokio-metrics` crate features are enabled.
+- formatted `tracing` logs to stdout
+- optional OTLP export for traces, logs, and metrics
+- optional `journald` output
+- optional localhost-only log-level control API
+- optional Tokio runtime metrics via OpenTelemetry
+
+Cargo features:
+
+- `otlp` — enables OTLP trace, log, and metric export and the OTLP configuration types
+- `journald` — enables `tracing-journald` output
+- `log-control` — enables localhost-only HTTP endpoints for runtime filter changes
+- `tokio-metrics` — enables Tokio runtime gauges via OpenTelemetry
+
+## Full configuration example
+
+This example assumes the `otlp`, `log-control`, `journald`, and `tokio-metrics`
+crate features are enabled.
 
 ```rust
 # use std::collections::HashMap;
@@ -109,50 +90,38 @@ let _telemetry = TelemetryBuilder::new("controller")
 
 Defaults:
 
-- local filter comes from `RUST_LOG`, falling back to `info`
-- log-control port defaults to `6669`
-- OTLP defaults are local-first and target `http://localhost:4318` for OTLP/HTTP
-- OTLP metric export defaults to a 5 second interval and can be overridden with `OtlpConfig::metrics_interval` between 1 second and 1 day
-- Tokio runtime metric collection defaults to a 5 second interval and can be overridden with `TelemetryBuilder::with_tokio_metrics_interval(...)`
+- stdout filter: `RUST_LOG`, falling back to `info`
+- log-control port: `6669`
+- OTLP endpoint: `http://localhost:4318`
+- OTLP metric interval: 5 seconds, configurable from 1 second to 1 day
+- Tokio metrics interval: 5 seconds
 
-## Documentation and examples
-
-API documentation is generated by `cargo doc` from crate and module rustdoc. The
-crate is configured explicitly by the consuming service; it does not discover or
-load files from the repository automatically.
-
-Compilable example applications live in `examples/`:
-
-- `stdout_only.rs` for local stdout logging with no exporters or control API
-- `stdout_custom_filter.rs` for an explicit fallback stdout filter
-- `greptime_otlp.rs` and `greptime_otlp.toml` for GreptimeDB OTLP/HTTP traces,
-  logs, and metrics configuration
-
-Notes:
-
-- Tokio metrics require the `tokio-metrics` crate feature and an installed OpenTelemetry global meter provider
-- enabling `TelemetryBuilder::enable_tokio_metrics()` without installing a meter provider records into OpenTelemetry's default no-op global meter
-- this crate installs a global meter provider when OTLP is enabled; without OTLP, consumers must install their own meter provider if they want Tokio runtime metrics exported anywhere
-- Tokio metrics also require compiling the process with `RUSTFLAGS="--cfg tokio_unstable"`
-- call `TelemetryGuard::shutdown().await` to gracefully stop background tasks before OTLP providers are shut down so final telemetry can flush cleanly
-- dropping `TelemetryGuard` without calling `shutdown` first falls back to best-effort teardown, aborts any tasks that are still running, and then attempts provider shutdown via `tokio::task::block_in_place` on multi-thread runtimes
-- the OTLP log rate limit is intentionally approximate at Unix-second boundaries under contention; it is a best-effort overload guard, not exact accounting
-- OTLP rate-limit warnings use at most one helper thread at a time to avoid spawning a new thread on every overflow transition during sustained overload
-- use `TelemetryBuilder::without_env_var()` when the process environment must not override the fallback stdout filter
+Use `TelemetryBuilder::without_env_var()` to ignore `RUST_LOG`.
 
 ## Log control API
 
 When `log-control` is enabled, the crate binds an HTTP server only on `127.0.0.1`.
-There is no authentication, so any local process can inspect and change runtime
-filters.
-
-Endpoints:
+There is no authentication, so any local process can inspect and change runtime filters.
+Invalid filters return `400`.
 
 - `GET /filters` returns `{ "stdout": "...", "otlp": "..." | null }`
-- `PUT /filters/stdout` accepts `{ "filter": "..." }` and returns the updated filter state or `400`
-- `PUT /filters/otlp` accepts `{ "filter": "..." }` and returns the updated filter state, `400`, or `404` when OTLP is unavailable
+- `PUT /filters/stdout` accepts `{ "filter": "..." }` and returns the updated filter state
+- `PUT /filters/otlp` accepts `{ "filter": "..." }`, returns the updated filter state, and returns `404` when OTLP is unavailable
 
-`PUT /filters/otlp` only works when OTLP is enabled for the process.
+## Examples
+
+See `examples/`:
+
+- `stdout_only.rs` — local stdout logging with no exporters or control API
+- `stdout_custom_filter.rs` — stdout logging with an explicit fallback filter
+- `greptime_otlp.rs` — GreptimeDB OTLP/HTTP traces, logs, and metrics configuration
+
+Companion configuration:
+
+- `greptime_otlp.toml` — configuration for the GreptimeDB example
+
+GreptimeDB export does not require a dedicated feature; configure headers with
+`OtlpConfig::headers`.
 
 ## License
 
