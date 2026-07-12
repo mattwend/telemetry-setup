@@ -9,7 +9,7 @@ repository = "https://github.com/mattwend/telemetry-setup"
 readme = "README.md"
 keywords = ["telemetry", "tracing", "opentelemetry", "otlp", "logging"]
 categories = ["development-tools::debugging", "development-tools::profiling", "rust-patterns"]
-rust-version = "1.85"
+rust-version = "1.87"
 
 
 [package.metadata.docs.rs]
@@ -31,21 +31,21 @@ log-control = ["dep:axum"]
 tokio-metrics = ["dep:opentelemetry"]
 
 [dependencies]
-tracing = "0.1"
-tracing-core = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
-thiserror = "2.0"
-serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.52", features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["http-proto", "trace", "metrics", "logs"], optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics", "logs"], optional = true }
-opentelemetry-appender-tracing = { version = "0.31", optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
-tracing-journald = { version = "0.3", optional = true }
-axum = { version = "0.8", optional = true }
-url = { version = "2.5", optional = true }
-tokio-util = "0.7"
+tracing = "0.1.44"
+tracing-core = "0.1.36"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "registry"] }
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
+opentelemetry = { version = "0.32.0", optional = true }
+opentelemetry-otlp = { version = "0.32.0", features = ["http-proto", "trace", "metrics", "logs"], optional = true }
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio", "metrics", "logs"], optional = true }
+opentelemetry-appender-tracing = { version = "0.32.0", optional = true }
+tracing-opentelemetry = { version = "0.33.0", optional = true }
+tracing-journald = { version = "0.3.2", optional = true }
+axum = { version = "0.8.9", optional = true }
+url = { version = "2.5.8", optional = true }
+tokio-util = "0.7.18"
 
 [[example]]
 name = "greptime_otlp"
@@ -58,9 +58,9 @@ name = "stdout_only"
 name = "stdout_custom_filter"
 
 [dev-dependencies]
-toml = "1.1"
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time"] }
-tower = { version = "0.5", features = ["util"] }
+toml = "1.1.2"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
 
 [[test]]
 name = "init_otlp"

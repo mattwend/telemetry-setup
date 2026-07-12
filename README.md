@@ -30,6 +30,8 @@ This crate enables Tokio's `rt-multi-thread` feature to support the multi-thread
 
 ## Prerequisites
 
+- Rust 1.87 or newer.
+
 Tokio metrics require the `tokio-metrics` feature and an installed OpenTelemetry
 meter provider. With OTLP enabled, this crate installs one automatically.
 Without OTLP, consumers must install their own meter provider or Tokio metrics
