@@ -44,6 +44,6 @@ Before opening a pull request, run:
 
 ## Project notes
 
-- The crate is a shared telemetry setup library for Rust services
+- The crate is an opinionated telemetry setup library for Rust services
 - Optional functionality is feature-gated (`otlp`, `journald`, `log-control`, `tokio-metrics`)
 - Update examples or README usage snippets when public APIs or expected setup flows change
