@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use crate::reload::{ReloadCallback, SharedFilter};
+use crate::reload::{ReloadCallback, SharedFilter, SharedOtlpFilter};
 
 #[derive(Clone)]
 /// Shared state used by the runtime log-control HTTP server.
@@ -10,12 +10,11 @@ pub(crate) struct ReloadState {
     /// The currently active local stdout and journald filter string, shared
     /// with a late configuration.
     pub stdout_filter: SharedFilter,
-    /// The currently active OTLP filter string, when OTLP export is enabled.
-    pub otlp_filter: Arc<Mutex<Option<String>>>,
+    /// The OTLP filter domain, shared with a late configuration that starts
+    /// OTLP export.
+    pub otlp_filter: SharedOtlpFilter,
     /// Callback used to reload the local stdout and journald filter domain.
     pub stdout_reload: ReloadCallback,
-    /// Callback used to reload OTLP trace and log filters.
-    pub otlp_reload: Option<ReloadCallback>,
 }
 
 impl ReloadState {
@@ -25,24 +24,21 @@ impl ReloadState {
     ///
     /// * `stdout_filter` - Shared record of the active local stdout and
     ///   journald filter.
-    /// * `otlp_filter` - Currently active OTLP filter, when OTLP export is enabled.
+    /// * `otlp_filter` - Shared record of the OTLP filter domain.
     /// * `stdout_reload` - Callback that applies local filter updates.
-    /// * `otlp_reload` - Callback that applies OTLP filter updates, when available.
     ///
     /// # Returns
     ///
     /// A reload state value ready to share with the log-control router.
     pub(crate) fn new(
         stdout_filter: SharedFilter,
-        otlp_filter: Option<String>,
+        otlp_filter: SharedOtlpFilter,
         stdout_reload: ReloadCallback,
-        otlp_reload: Option<ReloadCallback>,
     ) -> Self {
         Self {
             stdout_filter,
-            otlp_filter: Arc::new(Mutex::new(otlp_filter)),
+            otlp_filter,
             stdout_reload,
-            otlp_reload,
         }
     }
 }

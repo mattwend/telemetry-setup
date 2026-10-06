@@ -68,6 +68,47 @@ pub(crate) fn reload_shared(
     Ok(current.clone())
 }
 
+/// An OTLP filter domain that is installed and exporting: its active
+/// expression and the callback that replaces it.
+#[cfg(any(feature = "otlp", feature = "log-control"))]
+#[derive(Clone)]
+#[cfg_attr(not(feature = "log-control"), allow(dead_code))]
+pub(crate) struct OtlpFilter {
+    /// The active expression of the OTLP trace and log filters.
+    pub current: String,
+    /// Reloads the OTLP trace and log filters.
+    pub reload: ReloadCallback,
+}
+
+#[cfg(any(feature = "otlp", feature = "log-control"))]
+impl std::fmt::Debug for OtlpFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpFilter")
+            .field("current", &self.current)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The OTLP filter domain, absent until OTLP export runs. A late OTLP
+/// configuration fills it, so log control can manage it from then on.
+#[cfg(any(feature = "otlp", feature = "log-control"))]
+pub(crate) type SharedOtlpFilter = Arc<Mutex<Option<OtlpFilter>>>;
+
+/// Creates the shared record of the OTLP filter domain.
+///
+/// # Arguments
+///
+/// * `filter` - The domain installed at init, or `None` when OTLP export is
+///   not running yet.
+///
+/// # Returns
+///
+/// A shared, lockable copy of `filter`.
+#[cfg(any(feature = "otlp", feature = "log-control"))]
+pub(crate) fn shared_otlp_filter(filter: Option<OtlpFilter>) -> SharedOtlpFilter {
+    Arc::new(Mutex::new(filter))
+}
+
 /// Builds a callback that replaces the filter behind `handle`.
 ///
 /// # Arguments

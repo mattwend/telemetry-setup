@@ -129,10 +129,11 @@ filtered `off` and without an exporter; applying a late OTLP configuration
 fills their processor slots, sets their filter and rate limit, and installs the
 metric pipeline as the global meter provider. Events emitted before the call
 are not exported. The stdout filter is replaced unless the configured
-environment variable chose it at init; log control's `GET /filters` reports the
-late stdout filter. A late OTLP configuration is refused when OTLP was
-configured at init, and a second application or one after `shutdown()` is
-refused. Log control does not manage the late OTLP filter, and Tokio runtime metrics started
+environment variable chose it at init. Log control reports and manages both
+late filters: until a late OTLP configuration is applied, `GET /filters`
+reports `"otlp": null` and `PUT /filters/otlp` returns `404`. A late OTLP
+configuration is refused when OTLP was configured at init, and a second
+application or one after `shutdown()` is refused. Tokio runtime metrics started
 at init keep the meter provider that was global then.
 
 ## Log control API
@@ -143,7 +144,7 @@ Invalid filters return `400`.
 
 - `GET /filters` returns `{ "stdout": "...", "otlp": "..." | null }`
 - `PUT /filters/stdout` accepts `{ "filter": "..." }` and returns the updated filter state
-- `PUT /filters/otlp` accepts `{ "filter": "..." }`, returns the updated filter state, and returns `404` when OTLP is unavailable
+- `PUT /filters/otlp` accepts `{ "filter": "..." }`, returns the updated filter state, and returns `404` while OTLP export is not running
 
 ## Examples
 

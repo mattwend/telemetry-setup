@@ -280,6 +280,8 @@ mod tests {
             stdout_from_env: false,
             #[cfg(feature = "otlp")]
             otlp: None,
+            #[cfg(feature = "otlp")]
+            otlp_current: crate::reload::shared_otlp_filter(None),
         });
 
         assert!(guard.shutdown().await.is_ok());

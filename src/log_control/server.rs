@@ -111,12 +111,11 @@ mod tests {
         let callback_calls = reload_calls.clone();
         let state = ReloadState::new(
             crate::reload::shared_filter("info"),
-            None,
+            crate::reload::shared_otlp_filter(None),
             std::sync::Arc::new(move |_| {
                 callback_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }),
-            None,
         );
         let cancel_token = CancellationToken::new();
         let handle = spawn_log_control_server_from_listener(listener, state, cancel_token.clone());
@@ -166,9 +165,8 @@ mod tests {
         let port = occupied.local_addr().unwrap().port();
         let state = ReloadState::new(
             crate::reload::shared_filter("info"),
-            None,
+            crate::reload::shared_otlp_filter(None),
             std::sync::Arc::new(|_| Ok(())),
-            None,
         );
 
         let error =

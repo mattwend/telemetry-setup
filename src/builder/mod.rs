@@ -45,6 +45,8 @@ use crate::log_control::{LogControlConfig, ReloadState, spawn_log_control_server
 use crate::otlp::OtlpConfig;
 #[cfg(feature = "otlp")]
 use crate::reload::otlp_reload_callback;
+#[cfg(any(feature = "otlp", feature = "log-control"))]
+use crate::reload::{OtlpFilter, shared_otlp_filter};
 use crate::reload::{ReloadCallback, shared_filter, stdout_reload_callback};
 
 /// Builder for installing local logging, optional OTLP export, and related helpers.
@@ -74,9 +76,9 @@ struct InitializedOtlpProviders {
 struct InstalledSubscriber {
     /// Reloads the stdout and journald filters.
     stdout_reload: ReloadCallback,
-    /// Reloads the OTLP filters of an OTLP export configured at init.
-    #[cfg_attr(not(feature = "log-control"), allow(dead_code))]
-    otlp_reload: Option<ReloadCallback>,
+    /// The OTLP filter domain of an OTLP export configured at init.
+    #[cfg(any(feature = "otlp", feature = "log-control"))]
+    otlp_filter: Option<OtlpFilter>,
     #[cfg(feature = "otlp")]
     providers: Option<InitializedOtlpProviders>,
     #[cfg(feature = "otlp")]
@@ -297,19 +299,13 @@ impl TelemetryBuilder {
         let stdout_filter =
             EnvFilter::try_new(stdout_spec.as_str()).map_err(TelemetryError::subscriber)?;
 
-        #[cfg(all(feature = "log-control", feature = "otlp"))]
-        let otlp_current = self
-            .otlp_config
-            .as_ref()
-            .map(|config| config.log_level.clone());
-        #[cfg(all(feature = "log-control", not(feature = "otlp")))]
-        let otlp_current = None;
-
         let installed = self.install_subscriber(stdout_filter, stdout_spec.as_str())?;
 
         let cancel_token = CancellationToken::new();
         let mut guard = TelemetryGuard::new(cancel_token);
         let stdout_current = shared_filter(stdout_spec);
+        #[cfg(any(feature = "otlp", feature = "log-control"))]
+        let otlp_current = shared_otlp_filter(installed.otlp_filter);
 
         #[cfg(feature = "otlp")]
         if let Some(providers) = installed.providers {
@@ -325,6 +321,8 @@ impl TelemetryBuilder {
                 stdout_from_env: filter::environment_filter(&self.env_var_name).is_some(),
                 #[cfg(feature = "otlp")]
                 otlp: installed.deferred,
+                #[cfg(feature = "otlp")]
+                otlp_current: otlp_current.clone(),
             });
         }
 
@@ -339,12 +337,7 @@ impl TelemetryBuilder {
 
         #[cfg(feature = "log-control")]
         if let Some(config) = self.log_control_config {
-            let state = ReloadState::new(
-                stdout_current,
-                otlp_current,
-                installed.stdout_reload,
-                installed.otlp_reload,
-            );
+            let state = ReloadState::new(stdout_current, otlp_current, installed.stdout_reload);
             let task = spawn_log_control_server(config, state, guard.cancel_token.child_token())?;
             guard.background_tasks.push(task);
         }
@@ -400,7 +393,7 @@ impl TelemetryBuilder {
         #[cfg(feature = "otlp")]
         {
             let otlp = self.build_otlp()?;
-            let (trace_layer, log_layer, otlp_reload, providers, deferred) = match otlp {
+            let (trace_layer, log_layer, otlp_filter, providers, deferred) = match otlp {
                 Some(otlp) => {
                     let (trace_layer, trace_reload) = layers::build_otlp_trace_layer::<_>(
                         &otlp.tracer_provider,
@@ -436,7 +429,10 @@ impl TelemetryBuilder {
                         None => (
                             Some(trace_layer),
                             Some(log_layer),
-                            Some(reload),
+                            Some(OtlpFilter {
+                                current: otlp.filter,
+                                reload,
+                            }),
                             Some(providers),
                             None,
                         ),
@@ -451,7 +447,7 @@ impl TelemetryBuilder {
                 .map_err(TelemetryError::subscriber)?;
             Ok(InstalledSubscriber {
                 stdout_reload,
-                otlp_reload,
+                otlp_filter,
                 providers,
                 deferred,
             })
@@ -461,7 +457,8 @@ impl TelemetryBuilder {
             subscriber.try_init().map_err(TelemetryError::subscriber)?;
             Ok(InstalledSubscriber {
                 stdout_reload,
-                otlp_reload: None,
+                #[cfg(feature = "log-control")]
+                otlp_filter: None,
             })
         }
     }

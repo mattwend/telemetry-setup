@@ -30,7 +30,7 @@ use super::providers::{
 };
 use super::rate_limit::RateLimitFilter;
 use crate::error::TelemetryError;
-use crate::reload::ReloadCallback;
+use crate::reload::{OtlpFilter, ReloadCallback, SharedOtlpFilter};
 
 /// The filter of the deferred layers until a configuration is attached.
 pub(crate) const DEFERRED_FILTER: &str = "off";
@@ -168,6 +168,8 @@ impl DeferredOtlp {
     ///
     /// * `config` - Collector endpoint, headers, filter, resource, and rate
     ///   limit.
+    /// * `control` - The shared OTLP filter domain, filled on success so log
+    ///   control can manage the filter.
     ///
     /// # Returns
     ///
@@ -178,7 +180,11 @@ impl DeferredOtlp {
     ///
     /// Returns [`TelemetryError`] when the filter does not parse, an exporter
     /// cannot be built, or the filters cannot be reloaded.
-    pub(crate) fn attach(self, config: &OtlpConfig) -> Result<SdkMeterProvider, TelemetryError> {
+    pub(crate) fn attach(
+        self,
+        config: &OtlpConfig,
+        control: &SharedOtlpFilter,
+    ) -> Result<SdkMeterProvider, TelemetryError> {
         EnvFilter::try_new(config.log_level.as_str()).map_err(TelemetryError::subscriber)?;
         let resource = resource(&effective_service_name(&self.service_name, config));
         let mut spans = BatchSpanProcessor::builder(build_trace_exporter(config)?).build();
@@ -192,7 +198,16 @@ impl DeferredOtlp {
             return Err(TelemetryError::LateConfigurationUnavailable);
         }
         self.rate_limit.set_limit(config.log_rate_limit_per_sec);
+        // Reload and publish under the lock log control takes, so an update
+        // through log control cannot interleave with this one.
+        let mut control = control
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         (self.filter)(config.log_level.clone()).map_err(TelemetryError::FilterReload)?;
+        *control = Some(OtlpFilter {
+            current: config.log_level.clone(),
+            reload: self.filter,
+        });
         Ok(meter_provider)
     }
 }

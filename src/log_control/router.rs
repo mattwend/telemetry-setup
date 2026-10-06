@@ -37,11 +37,17 @@ pub(super) fn build_router(state: ReloadState) -> Router {
         .with_state(state)
 }
 
+/// Returns the active OTLP filter expression, or `None` while OTLP export is
+/// not running.
+fn current_otlp_filter(state: &ReloadState) -> Option<String> {
+    clone_mutex_value(&state.otlp_filter).map(|filter| filter.current)
+}
+
 /// Returns the current stdout and OTLP filter strings.
 async fn get_filters(State(state): State<ReloadState>) -> Json<FiltersResponse> {
     Json(FiltersResponse {
         stdout: clone_mutex_value(&state.stdout_filter),
-        otlp: clone_mutex_value(&state.otlp_filter),
+        otlp: current_otlp_filter(&state),
     })
 }
 
@@ -55,7 +61,7 @@ async fn update_stdout_filter(
 
     Ok(Json(FiltersResponse {
         stdout,
-        otlp: clone_mutex_value(&state.otlp_filter),
+        otlp: current_otlp_filter(&state),
     }))
 }
 
@@ -64,21 +70,21 @@ async fn update_otlp_filter(
     State(state): State<ReloadState>,
     Json(update): Json<FilterUpdate>,
 ) -> Result<Json<FiltersResponse>, (StatusCode, String)> {
-    let Some(reload) = &state.otlp_reload else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "OTLP filtering is not enabled for this process".to_string(),
-        ));
-    };
-
     let otlp = {
         let mut otlp_filter = state
             .otlp_filter
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        reload(update.filter.clone()).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-        *otlp_filter = Some(update.filter);
-        otlp_filter.clone()
+        let Some(otlp_filter) = otlp_filter.as_mut() else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "OTLP filtering is not enabled for this process".to_string(),
+            ));
+        };
+        (otlp_filter.reload)(update.filter.clone())
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        otlp_filter.current = update.filter;
+        Some(otlp_filter.current.clone())
     };
 
     Ok(Json(FiltersResponse {
@@ -93,6 +99,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{ReloadState, build_router};
+    use crate::reload::OtlpFilter;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt;
@@ -100,9 +107,11 @@ mod tests {
     fn test_state(with_otlp: bool) -> ReloadState {
         ReloadState::new(
             crate::reload::shared_filter("info"),
-            with_otlp.then(|| "warn".to_string()),
+            crate::reload::shared_otlp_filter(with_otlp.then(|| OtlpFilter {
+                current: "warn".to_string(),
+                reload: std::sync::Arc::new(|_| Ok(())),
+            })),
             std::sync::Arc::new(|_| Ok(())),
-            with_otlp.then(|| std::sync::Arc::new(|_| Ok(())) as _),
         )
     }
 
@@ -127,13 +136,12 @@ mod tests {
         let callback_calls = calls.clone();
         let state = ReloadState::new(
             crate::reload::shared_filter("info"),
-            None,
+            crate::reload::shared_otlp_filter(None),
             std::sync::Arc::new(move |filter| {
                 assert_eq!(filter, "debug");
                 callback_calls.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }),
-            None,
         );
         let app = build_router(state);
 
@@ -171,9 +179,8 @@ mod tests {
     async fn updating_stdout_filter_maps_reload_errors_to_bad_request() {
         let state = ReloadState::new(
             crate::reload::shared_filter("info"),
-            None,
+            crate::reload::shared_otlp_filter(None),
             std::sync::Arc::new(|_| Err("invalid filter".to_string())),
-            None,
         );
         let app = build_router(state);
 
@@ -198,13 +205,15 @@ mod tests {
         let callback_observed_filter = observed_filter.clone();
         let state = ReloadState::new(
             crate::reload::shared_filter("info"),
-            Some("warn".to_string()),
-            std::sync::Arc::new(|_| Ok(())),
-            Some(std::sync::Arc::new(move |filter| {
-                callback_calls.fetch_add(1, Ordering::Relaxed);
-                *callback_observed_filter.lock().unwrap() = Some(filter);
-                Ok(())
+            crate::reload::shared_otlp_filter(Some(OtlpFilter {
+                current: "warn".to_string(),
+                reload: std::sync::Arc::new(move |filter| {
+                    callback_calls.fetch_add(1, Ordering::Relaxed);
+                    *callback_observed_filter.lock().unwrap() = Some(filter);
+                    Ok(())
+                }),
             })),
+            std::sync::Arc::new(|_| Ok(())),
         );
         let app = build_router(state);
 

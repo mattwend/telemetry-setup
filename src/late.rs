@@ -86,6 +86,10 @@ pub(crate) struct LateSlot {
     /// The deferred OTLP layers, absent when OTLP was configured at init.
     #[cfg(feature = "otlp")]
     pub otlp: Option<crate::otlp::DeferredOtlp>,
+    /// The OTLP filter domain, shared with log control, which a late OTLP
+    /// configuration fills.
+    #[cfg(feature = "otlp")]
+    pub otlp_current: crate::reload::SharedOtlpFilter,
 }
 
 impl std::fmt::Debug for LateSlot {
@@ -135,7 +139,7 @@ impl LateSlot {
         let mut applied = Applied::default();
         #[cfg(feature = "otlp")]
         if let (Some(otlp), Some(deferred)) = (config.otlp, self.otlp) {
-            applied.meter_provider = Some(deferred.attach(&otlp)?);
+            applied.meter_provider = Some(deferred.attach(&otlp, &self.otlp_current)?);
         }
         Ok(applied)
     }
@@ -155,6 +159,8 @@ mod tests {
             stdout_from_env,
             #[cfg(feature = "otlp")]
             otlp: None,
+            #[cfg(feature = "otlp")]
+            otlp_current: crate::reload::shared_otlp_filter(None),
         }
     }
 
