@@ -29,7 +29,5 @@ mod server;
 
 pub use config::LogControlConfig;
 
-#[cfg(feature = "otlp")]
-pub(crate) use reload::otlp_reload_callback;
-pub(crate) use reload::{ReloadCallback, ReloadState, stdout_reload_callback};
+pub(crate) use reload::ReloadState;
 pub(crate) use server::spawn_log_control_server;

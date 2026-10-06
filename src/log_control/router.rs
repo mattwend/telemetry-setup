@@ -7,6 +7,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use super::reload::{ReloadState, clone_mutex_value};
+use crate::reload::reload_shared;
 
 #[derive(Debug, Deserialize)]
 struct FilterUpdate {
@@ -49,16 +50,8 @@ async fn update_stdout_filter(
     State(state): State<ReloadState>,
     Json(update): Json<FilterUpdate>,
 ) -> Result<Json<FiltersResponse>, (StatusCode, String)> {
-    let stdout = {
-        let mut stdout_filter = state
-            .stdout_filter
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (state.stdout_reload)(update.filter.clone())
-            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-        *stdout_filter = update.filter;
-        stdout_filter.clone()
-    };
+    let stdout = reload_shared(&state.stdout_filter, &state.stdout_reload, update.filter)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
 
     Ok(Json(FiltersResponse {
         stdout,
@@ -106,7 +99,7 @@ mod tests {
 
     fn test_state(with_otlp: bool) -> ReloadState {
         ReloadState::new(
-            "info".to_string(),
+            crate::reload::shared_filter("info"),
             with_otlp.then(|| "warn".to_string()),
             std::sync::Arc::new(|_| Ok(())),
             with_otlp.then(|| std::sync::Arc::new(|_| Ok(())) as _),
@@ -133,7 +126,7 @@ mod tests {
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
         let callback_calls = calls.clone();
         let state = ReloadState::new(
-            "info".to_string(),
+            crate::reload::shared_filter("info"),
             None,
             std::sync::Arc::new(move |filter| {
                 assert_eq!(filter, "debug");
@@ -177,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn updating_stdout_filter_maps_reload_errors_to_bad_request() {
         let state = ReloadState::new(
-            "info".to_string(),
+            crate::reload::shared_filter("info"),
             None,
             std::sync::Arc::new(|_| Err("invalid filter".to_string())),
             None,
@@ -204,7 +197,7 @@ mod tests {
         let observed_filter = std::sync::Arc::new(Mutex::new(None));
         let callback_observed_filter = observed_filter.clone();
         let state = ReloadState::new(
-            "info".to_string(),
+            crate::reload::shared_filter("info"),
             Some("warn".to_string()),
             std::sync::Arc::new(|_| Ok(())),
             Some(std::sync::Arc::new(move |filter| {

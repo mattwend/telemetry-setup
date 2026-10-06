@@ -59,11 +59,15 @@ name = "stdout_custom_filter"
 
 [dev-dependencies]
 toml = "1.1.6"
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 
 [[test]]
 name = "init_otlp"
+required-features = ["otlp"]
+
+[[test]]
+name = "init_late_otlp"
 required-features = ["otlp"]
 
 [[test]]

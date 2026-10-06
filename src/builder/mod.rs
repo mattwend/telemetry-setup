@@ -38,14 +38,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::TelemetryError;
 use crate::guard::TelemetryGuard;
-#[cfg(all(feature = "log-control", feature = "otlp"))]
-use crate::log_control::otlp_reload_callback;
+use crate::late::LateSlot;
 #[cfg(feature = "log-control")]
-use crate::log_control::{
-    LogControlConfig, ReloadState, spawn_log_control_server, stdout_reload_callback,
-};
+use crate::log_control::{LogControlConfig, ReloadState, spawn_log_control_server};
 #[cfg(feature = "otlp")]
 use crate::otlp::OtlpConfig;
+#[cfg(feature = "otlp")]
+use crate::reload::otlp_reload_callback;
+use crate::reload::{ReloadCallback, shared_filter, stdout_reload_callback};
 
 /// Builder for installing local logging, optional OTLP export, and related helpers.
 pub struct TelemetryBuilder {
@@ -60,31 +60,27 @@ pub struct TelemetryBuilder {
     enable_journald: bool,
     enable_tokio_metrics: bool,
     tokio_metrics_interval: Duration,
+    late_configuration: bool,
 }
-
-#[cfg(feature = "log-control")]
-type StdoutReload = crate::log_control::ReloadCallback;
-#[cfg(all(feature = "log-control", feature = "otlp"))]
-type OtlpReload = Option<crate::log_control::ReloadCallback>;
 
 #[cfg(feature = "otlp")]
 struct InitializedOtlpProviders {
     tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
     logger_provider: opentelemetry_sdk::logs::SdkLoggerProvider,
-    meter_provider: opentelemetry_sdk::metrics::SdkMeterProvider,
+    meter_provider: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
 }
 
-#[cfg(feature = "log-control")]
-struct LogControlParts {
-    stdout_reload: StdoutReload,
-    otlp_reload: Option<crate::log_control::ReloadCallback>,
-}
-
+/// What `install_subscriber` installed.
 struct InstalledSubscriber {
+    /// Reloads the stdout and journald filters.
+    stdout_reload: ReloadCallback,
+    /// Reloads the OTLP filters of an OTLP export configured at init.
+    #[cfg_attr(not(feature = "log-control"), allow(dead_code))]
+    otlp_reload: Option<ReloadCallback>,
     #[cfg(feature = "otlp")]
     providers: Option<InitializedOtlpProviders>,
-    #[cfg(feature = "log-control")]
-    log_control: LogControlParts,
+    #[cfg(feature = "otlp")]
+    deferred: Option<crate::otlp::DeferredOtlp>,
 }
 
 impl std::fmt::Debug for TelemetryBuilder {
@@ -100,6 +96,7 @@ impl std::fmt::Debug for TelemetryBuilder {
         debug.field("enable_journald", &self.enable_journald);
         debug.field("enable_tokio_metrics", &self.enable_tokio_metrics);
         debug.field("tokio_metrics_interval", &self.tokio_metrics_interval);
+        debug.field("late_configuration", &self.late_configuration);
         debug.finish_non_exhaustive()
     }
 }
@@ -127,6 +124,7 @@ impl TelemetryBuilder {
             enable_journald: false,
             enable_tokio_metrics: false,
             tokio_metrics_interval: Duration::from_secs(5),
+            late_configuration: false,
         }
     }
 
@@ -256,6 +254,24 @@ impl TelemetryBuilder {
         self
     }
 
+    /// Prepares the subscriber for a configuration that is known only after
+    /// `init()`, applied once with
+    /// [`TelemetryGuard::apply_late_configuration`](crate::TelemetryGuard::apply_late_configuration).
+    ///
+    /// The stdout filter stays reloadable. With the `otlp` feature and no OTLP
+    /// configuration at init, the OTLP trace and log layers are installed
+    /// filtered `off` and without an exporter, so a late OTLP configuration can
+    /// start export without a second subscriber. Tokio runtime metrics started
+    /// at init keep the meter provider that was global at init.
+    ///
+    /// # Returns
+    ///
+    /// The updated builder.
+    pub fn with_late_configuration(mut self) -> Self {
+        self.late_configuration = true;
+        self
+    }
+
     /// Builds and installs the configured tracing subscriber and background tasks.
     ///
     /// # Returns
@@ -289,17 +305,27 @@ impl TelemetryBuilder {
         #[cfg(all(feature = "log-control", not(feature = "otlp")))]
         let otlp_current = None;
 
-        let _installed = self.install_subscriber(stdout_filter, stdout_spec.as_str())?;
+        let installed = self.install_subscriber(stdout_filter, stdout_spec.as_str())?;
 
         let cancel_token = CancellationToken::new();
-        #[allow(unused_mut)]
         let mut guard = TelemetryGuard::new(cancel_token);
+        let stdout_current = shared_filter(stdout_spec);
 
         #[cfg(feature = "otlp")]
-        if let Some(providers) = _installed.providers {
+        if let Some(providers) = installed.providers {
             guard.tracer_provider = Some(providers.tracer_provider);
             guard.logger_provider = Some(providers.logger_provider);
-            guard.meter_provider = Some(providers.meter_provider);
+            guard.meter_provider = providers.meter_provider;
+        }
+
+        if self.late_configuration {
+            guard.late = Some(LateSlot {
+                stdout_reload: installed.stdout_reload.clone(),
+                stdout_current: stdout_current.clone(),
+                stdout_from_env: filter::environment_filter(&self.env_var_name).is_some(),
+                #[cfg(feature = "otlp")]
+                otlp: installed.deferred,
+            });
         }
 
         #[cfg(feature = "tokio-metrics")]
@@ -314,10 +340,10 @@ impl TelemetryBuilder {
         #[cfg(feature = "log-control")]
         if let Some(config) = self.log_control_config {
             let state = ReloadState::new(
-                stdout_spec,
+                stdout_current,
                 otlp_current,
-                _installed.log_control.stdout_reload,
-                _installed.log_control.otlp_reload,
+                installed.stdout_reload,
+                installed.otlp_reload,
             );
             let task = spawn_log_control_server(config, state, guard.cancel_token.child_token())?;
             guard.background_tasks.push(task);
@@ -326,227 +352,157 @@ impl TelemetryBuilder {
         Ok(guard)
     }
 
+    /// Composes and installs the subscriber: stdout, optional journald, and
+    /// optional OTLP trace and log layers, every filter reloadable.
+    ///
+    /// # Arguments
+    ///
+    /// * `stdout_filter` - Initial stdout filter.
+    /// * `stdout_spec` - The expression `stdout_filter` was parsed from, shared
+    ///   with journald.
+    ///
+    /// # Returns
+    ///
+    /// The reload callbacks and providers of the installed layers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError`] when a layer or provider cannot be built or
+    /// the subscriber cannot be installed.
     fn install_subscriber(
         &self,
         stdout_filter: EnvFilter,
         stdout_spec: &str,
     ) -> Result<InstalledSubscriber, TelemetryError> {
+        let (fmt_layer, fmt_reload) =
+            layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
+
+        #[cfg(feature = "journald")]
+        let (journald_layer, journald_reload) = if self.enable_journald {
+            let (layer, reload) = layers::build_journald_layer::<_>(stdout_spec)?;
+            (Some(layer), Some(reload))
+        } else {
+            (None, None)
+        };
         #[cfg(not(feature = "journald"))]
-        let _ = stdout_spec;
-        if self.enable_journald {
-            #[cfg(feature = "journald")]
-            {
-                self.install_with_journald(stdout_filter, stdout_spec)
-            }
-            #[cfg(not(feature = "journald"))]
-            unreachable!("journald feature checked before subscriber installation")
-        } else {
-            self.install_without_journald(stdout_filter)
-        }
-    }
-
-    #[cfg(all(feature = "otlp", feature = "journald"))]
-    fn install_with_journald(
-        &self,
-        stdout_filter: EnvFilter,
-        stdout_spec: &str,
-    ) -> Result<InstalledSubscriber, TelemetryError> {
-        let (fmt_layer, _fmt_reload_or_unit) =
-            layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
-        let subscriber = tracing_subscriber::registry().with(fmt_layer);
-        let (journald_layer, _journald_reload_or_unit) =
-            layers::build_journald_layer::<_>(stdout_spec)?;
-        let subscriber = subscriber.with(journald_layer);
-
-        if let Some(otlp_config) = self.otlp_config.as_ref() {
-            let installed_otlp = self.install_otlp_layers(subscriber, otlp_config)?;
-
-            #[cfg(feature = "log-control")]
-            let log_control = LogControlParts {
-                stdout_reload: stdout_reload_callback(
-                    _fmt_reload_or_unit,
-                    Some(_journald_reload_or_unit),
-                ),
-                otlp_reload: installed_otlp.otlp_reload,
-            };
-
-            Ok(InstalledSubscriber {
-                providers: installed_otlp.providers,
-                #[cfg(feature = "log-control")]
-                log_control,
-            })
-        } else {
-            subscriber.try_init().map_err(TelemetryError::subscriber)?;
-
-            #[cfg(feature = "log-control")]
-            let log_control = LogControlParts {
-                stdout_reload: stdout_reload_callback(
-                    _fmt_reload_or_unit,
-                    Some(_journald_reload_or_unit),
-                ),
-                otlp_reload: None,
-            };
-
-            Ok(InstalledSubscriber {
-                providers: None,
-                #[cfg(feature = "log-control")]
-                log_control,
-            })
-        }
-    }
-
-    #[cfg(all(not(feature = "otlp"), feature = "journald"))]
-    fn install_with_journald(
-        &self,
-        stdout_filter: EnvFilter,
-        stdout_spec: &str,
-    ) -> Result<InstalledSubscriber, TelemetryError> {
-        let (fmt_layer, _fmt_reload_or_unit) =
-            layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
-        let subscriber = tracing_subscriber::registry().with(fmt_layer);
-        let (journald_layer, _journald_reload_or_unit) =
-            layers::build_journald_layer::<_>(stdout_spec)?;
-        subscriber
-            .with(journald_layer)
-            .try_init()
-            .map_err(TelemetryError::subscriber)?;
-
-        #[cfg(feature = "log-control")]
-        let log_control = LogControlParts {
-            stdout_reload: stdout_reload_callback(
-                _fmt_reload_or_unit,
-                Some(_journald_reload_or_unit),
-            ),
-            otlp_reload: None,
+        let (journald_layer, journald_reload): (
+            Option<tracing_subscriber::layer::Identity>,
+            Option<ReloadCallback>,
+        ) = {
+            let _ = stdout_spec;
+            (None, None)
         };
-
-        Ok(InstalledSubscriber {
-            #[cfg(feature = "otlp")]
-            providers: None,
-            #[cfg(feature = "log-control")]
-            log_control,
-        })
-    }
-
-    #[cfg(feature = "otlp")]
-    fn install_without_journald(
-        &self,
-        stdout_filter: EnvFilter,
-    ) -> Result<InstalledSubscriber, TelemetryError> {
-        let (fmt_layer, _fmt_reload_or_unit) =
-            layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
-        let subscriber = tracing_subscriber::registry().with(fmt_layer);
-
-        if let Some(otlp_config) = self.otlp_config.as_ref() {
-            let installed_otlp = self.install_otlp_layers(subscriber, otlp_config)?;
-
-            #[cfg(feature = "log-control")]
-            let log_control = LogControlParts {
-                stdout_reload: stdout_reload_callback(_fmt_reload_or_unit, None),
-                otlp_reload: installed_otlp.otlp_reload,
-            };
-
-            Ok(InstalledSubscriber {
-                providers: installed_otlp.providers,
-                #[cfg(feature = "log-control")]
-                log_control,
-            })
-        } else {
-            subscriber.try_init().map_err(TelemetryError::subscriber)?;
-
-            #[cfg(feature = "log-control")]
-            let log_control = LogControlParts {
-                stdout_reload: stdout_reload_callback(_fmt_reload_or_unit, None),
-                otlp_reload: None,
-            };
-
-            Ok(InstalledSubscriber {
-                providers: None,
-                #[cfg(feature = "log-control")]
-                log_control,
-            })
-        }
-    }
-
-    #[cfg(not(feature = "otlp"))]
-    fn install_without_journald(
-        &self,
-        stdout_filter: EnvFilter,
-    ) -> Result<InstalledSubscriber, TelemetryError> {
-        let (fmt_layer, _fmt_reload_or_unit) =
-            layers::build_fmt_layer::<tracing_subscriber::Registry>(stdout_filter);
-        tracing_subscriber::registry()
+        let stdout_reload = stdout_reload_callback(fmt_reload, journald_reload);
+        let subscriber = tracing_subscriber::registry()
             .with(fmt_layer)
-            .try_init()
-            .map_err(TelemetryError::subscriber)?;
+            .with(journald_layer);
 
-        #[cfg(feature = "log-control")]
-        let log_control = LogControlParts {
-            stdout_reload: stdout_reload_callback(_fmt_reload_or_unit, None),
-            otlp_reload: None,
-        };
-
-        Ok(InstalledSubscriber {
-            #[cfg(feature = "otlp")]
-            providers: None,
-            #[cfg(feature = "log-control")]
-            log_control,
-        })
+        #[cfg(feature = "otlp")]
+        {
+            let otlp = self.build_otlp()?;
+            let (trace_layer, log_layer, otlp_reload, providers, deferred) = match otlp {
+                Some(otlp) => {
+                    let (trace_layer, trace_reload) = layers::build_otlp_trace_layer::<_>(
+                        &otlp.tracer_provider,
+                        otlp.filter.as_str(),
+                    )?;
+                    let (log_layer, log_reload) = layers::build_otlp_log_layer::<_>(
+                        &otlp.logger_provider,
+                        otlp.filter.as_str(),
+                        otlp.rate_limit.clone(),
+                    )?;
+                    let reload = otlp_reload_callback(trace_reload, log_reload);
+                    let providers = InitializedOtlpProviders {
+                        tracer_provider: otlp.tracer_provider,
+                        logger_provider: otlp.logger_provider,
+                        meter_provider: otlp.meter_provider,
+                    };
+                    match otlp.deferred {
+                        Some(deferred) => {
+                            let deferred = crate::otlp::DeferredOtlp::new(
+                                self.service_name.clone(),
+                                &deferred,
+                                reload,
+                                otlp.rate_limit,
+                            );
+                            (
+                                Some(trace_layer),
+                                Some(log_layer),
+                                None,
+                                Some(providers),
+                                Some(deferred),
+                            )
+                        }
+                        None => (
+                            Some(trace_layer),
+                            Some(log_layer),
+                            Some(reload),
+                            Some(providers),
+                            None,
+                        ),
+                    }
+                }
+                None => (None, None, None, None, None),
+            };
+            subscriber
+                .with(trace_layer)
+                .with(log_layer)
+                .try_init()
+                .map_err(TelemetryError::subscriber)?;
+            Ok(InstalledSubscriber {
+                stdout_reload,
+                otlp_reload,
+                providers,
+                deferred,
+            })
+        }
+        #[cfg(not(feature = "otlp"))]
+        {
+            subscriber.try_init().map_err(TelemetryError::subscriber)?;
+            Ok(InstalledSubscriber {
+                stdout_reload,
+                otlp_reload: None,
+            })
+        }
     }
 
+    /// Builds the OTLP providers to install: configured ones, deferred ones
+    /// for a late configuration, or none.
+    ///
+    /// # Returns
+    ///
+    /// The providers and the initial filter and rate limit of their layers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError`] when configured providers cannot be built.
     #[cfg(feature = "otlp")]
-    fn install_otlp_layers<S>(
-        &self,
-        subscriber: S,
-        otlp_config: &OtlpConfig,
-    ) -> Result<InstalledOtlp, TelemetryError>
-    where
-        S: tracing::Subscriber
-            + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let layers::OtlpLayerParts { providers } =
-            layers::build_otlp_parts(&self.service_name, otlp_config)?;
-
-        #[cfg(feature = "log-control")]
-        let (trace_layer, trace_reload) = layers::build_otlp_trace_layer::<_>(
-            &providers.tracer_provider,
-            otlp_config.log_level.as_str(),
-        )?;
-        #[cfg(not(feature = "log-control"))]
-        let trace_layer = layers::build_otlp_trace_layer::<_>(
-            &providers.tracer_provider,
-            otlp_config.log_level.as_str(),
-        )?;
-        let subscriber = subscriber.with(trace_layer);
-        #[cfg(feature = "log-control")]
-        let (log_layer, log_reload) = layers::build_otlp_log_layer::<_>(
-            &providers.logger_provider,
-            otlp_config.log_level.as_str(),
-            otlp_config.log_rate_limit_per_sec,
-        )?;
-        #[cfg(not(feature = "log-control"))]
-        let log_layer = layers::build_otlp_log_layer::<_>(
-            &providers.logger_provider,
-            otlp_config.log_level.as_str(),
-            otlp_config.log_rate_limit_per_sec,
-        )?;
-        subscriber
-            .with(log_layer)
-            .try_init()
-            .map_err(TelemetryError::subscriber)?;
-
-        Ok(InstalledOtlp {
-            providers: Some(InitializedOtlpProviders {
+    fn build_otlp(&self) -> Result<Option<OtlpParts>, TelemetryError> {
+        if let Some(config) = &self.otlp_config {
+            let providers = crate::otlp::build_providers(&self.service_name, config)?;
+            return Ok(Some(OtlpParts {
                 tracer_provider: providers.tracer_provider,
                 logger_provider: providers.logger_provider,
-                meter_provider: providers.meter_provider,
-            }),
-            #[cfg(feature = "log-control")]
-            otlp_reload: otlp_reload_callback(Some(trace_reload), Some(log_reload)),
-        })
+                meter_provider: Some(providers.meter_provider),
+                filter: config.log_level.clone(),
+                rate_limit: crate::otlp::RateLimitFilter::new_optional(
+                    config.log_rate_limit_per_sec,
+                ),
+                deferred: None,
+            }));
+        }
+        if !self.late_configuration {
+            return Ok(None);
+        }
+        let deferred = crate::otlp::build_deferred_providers();
+        Ok(Some(OtlpParts {
+            tracer_provider: deferred.tracer_provider.clone(),
+            logger_provider: deferred.logger_provider.clone(),
+            meter_provider: None,
+            filter: crate::otlp::DEFERRED_FILTER.to_string(),
+            rate_limit: crate::otlp::RateLimitFilter::new_optional(None),
+            deferred: Some(deferred),
+        }))
     }
 
     /// Resolves the local filter from the configured environment variable or fallback string.
@@ -555,11 +511,15 @@ impl TelemetryBuilder {
     }
 }
 
+/// The OTLP providers `init()` installs layers over.
 #[cfg(feature = "otlp")]
-struct InstalledOtlp {
-    providers: Option<InitializedOtlpProviders>,
-    #[cfg(feature = "log-control")]
-    otlp_reload: OtlpReload,
+struct OtlpParts {
+    tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
+    logger_provider: opentelemetry_sdk::logs::SdkLoggerProvider,
+    meter_provider: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
+    filter: String,
+    rate_limit: crate::otlp::RateLimitFilter,
+    deferred: Option<crate::otlp::DeferredProviders>,
 }
 
 #[cfg(test)]

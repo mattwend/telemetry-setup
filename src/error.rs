@@ -40,6 +40,21 @@ pub enum TelemetryError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// A late configuration was applied to a guard whose builder did not
+    /// request one with `TelemetryBuilder::with_late_configuration`, a second
+    /// time, or after `TelemetryGuard::shutdown`.
+    #[error(
+        "late telemetry configuration is unavailable: it was not requested at init, was \
+         already applied, or the guard was shut down"
+    )]
+    LateConfigurationUnavailable,
+    /// A late OTLP configuration was applied although OTLP export was
+    /// configured at init.
+    #[error("OTLP export was configured at init; a late OTLP configuration cannot replace it")]
+    OtlpAlreadyConfigured,
+    /// An installed filter could not be replaced.
+    #[error("failed to reload a telemetry filter: {0}")]
+    FilterReload(String),
     /// A tracked telemetry background task failed during shutdown.
     #[error("telemetry background task failed: {0}")]
     BackgroundTask(#[from] BackgroundTaskError),

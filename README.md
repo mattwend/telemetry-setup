@@ -100,6 +100,41 @@ Defaults:
 
 Use `TelemetryBuilder::without_env_var()` to ignore `RUST_LOG`.
 
+## Late configuration
+
+A service that must emit before it can read its own telemetry configuration —
+for example a daemon provisioned over its own API — requests a late
+configuration at init and applies it once:
+
+```rust
+# use telemetry_setup::{LateConfiguration, OtlpConfig, TelemetryBuilder};
+# async fn example(otlp: OtlpConfig) -> Result<(), telemetry_setup::TelemetryError> {
+let mut telemetry = TelemetryBuilder::new("controller")
+    .with_late_configuration()
+    .init()?;
+tracing::info!("waiting for configuration");
+
+telemetry.apply_late_configuration(
+    LateConfiguration::new()
+        .with_stdout_filter("info,controller=debug")
+        .with_otlp_config(otlp),
+)?;
+# telemetry.shutdown().await
+# }
+```
+
+The subscriber is still installed exactly once. With `otlp` enabled and no
+OTLP configuration at init, the OTLP trace and log layers are installed
+filtered `off` and without an exporter; applying a late OTLP configuration
+fills their processor slots, sets their filter and rate limit, and installs the
+metric pipeline as the global meter provider. Events emitted before the call
+are not exported. The stdout filter is replaced unless the configured
+environment variable chose it at init; log control's `GET /filters` reports the
+late stdout filter. A late OTLP configuration is refused when OTLP was
+configured at init, and a second application or one after `shutdown()` is
+refused. Log control does not manage the late OTLP filter, and Tokio runtime metrics started
+at init keep the meter provider that was global then.
+
 ## Log control API
 
 When `log-control` is enabled, the crate binds an HTTP server only on `127.0.0.1`.

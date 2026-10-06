@@ -110,7 +110,7 @@ mod tests {
         let reload_calls = std::sync::Arc::new(AtomicUsize::new(0));
         let callback_calls = reload_calls.clone();
         let state = ReloadState::new(
-            "info".to_string(),
+            crate::reload::shared_filter("info"),
             None,
             std::sync::Arc::new(move |_| {
                 callback_calls.fetch_add(1, Ordering::SeqCst);
@@ -165,7 +165,7 @@ mod tests {
         let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = occupied.local_addr().unwrap().port();
         let state = ReloadState::new(
-            "info".to_string(),
+            crate::reload::shared_filter("info"),
             None,
             std::sync::Arc::new(|_| Ok(())),
             None,
