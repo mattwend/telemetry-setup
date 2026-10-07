@@ -136,6 +136,11 @@ configuration is refused when OTLP was configured at init, and a second
 application or one after `shutdown()` is refused. Tokio runtime metrics started
 at init keep the meter provider that was global then.
 
+A failed application consumes the late slot. A service that must refuse an
+unusable configuration before committing to it calls
+`LateConfiguration::validate` first: it parses every filter and builds, then
+drops, every OTLP exporter, without installing anything.
+
 ## Log control API
 
 When `log-control` is enabled, the crate binds an HTTP server only on `127.0.0.1`.

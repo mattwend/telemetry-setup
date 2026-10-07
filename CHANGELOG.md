@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `TelemetryBuilder::with_late_configuration` and
   `TelemetryGuard::apply_late_configuration`: apply a stdout filter and start
   OTLP export once after `init()`, without a second subscriber.
+- `LateConfiguration::validate` checks a late configuration without applying
+  it, since a failed application consumes the late slot.
 
 ## 0.1.0 - 2026-04-26
 

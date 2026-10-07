@@ -52,6 +52,15 @@ pub enum TelemetryError {
     /// configured at init.
     #[error("OTLP export was configured at init; a late OTLP configuration cannot replace it")]
     OtlpAlreadyConfigured,
+    /// A filter expression did not parse.
+    #[error("invalid telemetry filter `{filter}`: {source}")]
+    InvalidFilter {
+        /// The filter expression.
+        filter: String,
+        /// Underlying parse error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// An installed filter could not be replaced.
     #[error("failed to reload a telemetry filter: {0}")]
     FilterReload(String),

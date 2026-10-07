@@ -139,6 +139,19 @@ pub(super) fn build_meter_provider(
     Ok(meter_provider)
 }
 
+/// Checks that every exporter `config` names can be built, without installing
+/// anything.
+///
+/// The exporters are built and dropped, so this sees exactly what an
+/// installation would, including the environment variables the exporter
+/// builders read.
+pub(crate) fn check_exporters(config: &OtlpConfig) -> Result<(), TelemetryError> {
+    build_trace_exporter(config)?;
+    build_log_exporter(config)?;
+    build_metric_exporter(config)?;
+    Ok(())
+}
+
 /// Builds the OTLP trace exporter from `config`.
 pub(super) fn build_trace_exporter(
     config: &OtlpConfig,

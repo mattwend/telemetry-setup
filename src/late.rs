@@ -71,6 +71,39 @@ impl LateConfiguration {
         self.otlp = Some(config);
         self
     }
+
+    /// Checks that this configuration can be applied, without applying it.
+    ///
+    /// Parses every filter and builds, then drops, every OTLP exporter, so a
+    /// service can refuse a configuration before it commits to it rather than
+    /// discover the failure in
+    /// [`TelemetryGuard::apply_late_configuration`](crate::TelemetryGuard::apply_late_configuration),
+    /// which consumes the late slot even when it fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError::InvalidFilter`] for a filter that does not
+    /// parse and the exporter error for an OTLP export that cannot be built.
+    pub fn validate(&self) -> Result<(), TelemetryError> {
+        if let Some(filter) = &self.stdout_filter {
+            check_filter(filter)?;
+        }
+        #[cfg(feature = "otlp")]
+        if let Some(otlp) = &self.otlp {
+            check_filter(&otlp.log_level)?;
+            crate::otlp::check_exporters(otlp)?;
+        }
+        Ok(())
+    }
+}
+
+fn check_filter(filter: &str) -> Result<(), TelemetryError> {
+    tracing_subscriber::EnvFilter::try_new(filter)
+        .map(drop)
+        .map_err(|error| TelemetryError::InvalidFilter {
+            filter: filter.to_string(),
+            source: Box::new(error),
+        })
 }
 
 /// What `init()` installed for a late configuration.
@@ -162,6 +195,47 @@ mod tests {
             #[cfg(feature = "otlp")]
             otlp_current: crate::reload::shared_otlp_filter(None),
         }
+    }
+
+    #[test]
+    fn validate_accepts_a_valid_configuration() {
+        let config = LateConfiguration::new().with_stdout_filter("info,controller=debug");
+        #[cfg(feature = "otlp")]
+        let config = config.with_otlp_config(crate::OtlpConfig::default());
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_a_malformed_stdout_filter() {
+        let error = LateConfiguration::new()
+            .with_stdout_filter("[")
+            .validate()
+            .unwrap_err();
+
+        assert!(matches!(error, crate::TelemetryError::InvalidFilter { .. }));
+    }
+
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn validate_rejects_a_malformed_otlp_filter_and_url() {
+        let filter = LateConfiguration::new().with_otlp_config(crate::OtlpConfig {
+            log_level: "[".to_string(),
+            ..crate::OtlpConfig::default()
+        });
+        let url = LateConfiguration::new().with_otlp_config(crate::OtlpConfig {
+            url: "://not-a-url".to_string(),
+            ..crate::OtlpConfig::default()
+        });
+
+        assert!(matches!(
+            filter.validate(),
+            Err(crate::TelemetryError::InvalidFilter { .. })
+        ));
+        assert!(matches!(
+            url.validate(),
+            Err(crate::TelemetryError::OtlpEndpoint { .. })
+        ));
     }
 
     #[test]
