@@ -58,6 +58,8 @@ name = "stdout_only"
 name = "stdout_custom_filter"
 
 [dev-dependencies]
+opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs", "metrics"] }
+prost = "0.14.4"
 toml = "1.1.6"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tower = { version = "0.5.3", features = ["util"] }

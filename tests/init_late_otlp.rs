@@ -3,7 +3,16 @@
 // `init()` installs a process-global subscriber, so this case needs its own
 // test binary.
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use opentelemetry::global;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::common::v1::any_value::Value;
+use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point};
+use opentelemetry_proto::tonic::resource::v1::Resource;
+use prost::Message;
 use telemetry_setup::{LateConfiguration, OtlpConfig, TelemetryBuilder, TelemetryError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -68,32 +77,73 @@ async fn collector() -> (String, Received) {
     (url, received)
 }
 
-fn log_bodies_contain(received: &Received, needle: &str) -> bool {
+/// Decodes the OTLP requests in `received` sent to `path`.
+///
+/// Returns the decoded messages, panicking if any matching body is invalid.
+fn exported_requests<T: Message + Default>(received: &Received, path: &str) -> Vec<T> {
     received
         .lock()
         .expect("sink")
         .iter()
-        .filter(|(path, _)| path == "/v1/logs")
-        .any(|(_, body)| body.windows(needle.len()).any(|w| w == needle.as_bytes()))
+        .filter(|(request_path, _)| request_path == path)
+        .map(|(_, body)| T::decode(body.as_slice()).expect("decode OTLP request"))
+        .collect()
 }
 
+/// Asserts that `resource` carries `expected` as its `service.name` attribute.
+///
+/// Returns nothing, panicking if the resource or the expected attribute is absent.
+fn assert_service_name(resource: Option<&Resource>, expected: &str) {
+    let resource = resource.expect("exported resource");
+    let service_name = resource
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key == "service.name")
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref());
+    assert_eq!(
+        service_name,
+        Some(&Value::StringValue(expected.to_string()))
+    );
+}
+
+/// Verifies late export of all signals, their resources, and one-shot attachment.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_late_otlp_configuration_starts_export_once() {
     let (url, received) = collector().await;
+    let service_name = "late-otlp-override";
     let mut guard = TelemetryBuilder::new("late-otlp")
         .without_env_var()
+        .with_stdout_filter("off")
         .with_late_configuration()
         .init()
         .expect("init");
 
-    tracing::info!("emitted before the attach");
+    tracing::info_span!("before_attach").in_scope(|| {
+        tracing::info!("emitted before the attach");
+    });
+    global::meter("late-otlp-test")
+        .u64_counter("late_otlp_before_attach")
+        .build()
+        .add(1, &[]);
+
     guard
         .apply_late_configuration(LateConfiguration::new().with_otlp_config(OtlpConfig {
             url,
+            service_name: Some(service_name.to_string()),
+            // Keep periodic export out of the test; shutdown must flush all signals.
+            metrics_interval: Duration::from_secs(86400),
             ..OtlpConfig::default()
         }))
         .expect("attach");
-    tracing::info!("emitted after the attach");
+    tracing::info_span!("after_attach").in_scope(|| {
+        tracing::info!("emitted after the attach");
+    });
+    // Obtain a fresh meter after attach: existing meters keep their old provider.
+    global::meter("late-otlp-test")
+        .u64_counter("late_otlp_after_attach")
+        .build()
+        .add(7, &[]);
 
     assert!(matches!(
         guard.apply_late_configuration(LateConfiguration::new()),
@@ -101,6 +151,66 @@ async fn a_late_otlp_configuration_starts_export_once() {
     ));
 
     guard.shutdown().await.expect("shutdown flushes");
-    assert!(log_bodies_contain(&received, "emitted after the attach"));
-    assert!(!log_bodies_contain(&received, "emitted before the attach"));
+
+    let mut log_bodies = Vec::new();
+    for request in exported_requests::<ExportLogsServiceRequest>(&received, "/v1/logs") {
+        for logs in request.resource_logs {
+            assert_service_name(logs.resource.as_ref(), service_name);
+            log_bodies.extend(
+                logs.scope_logs
+                    .into_iter()
+                    .flat_map(|scope| scope.log_records)
+                    .filter_map(|record| record.body.and_then(|body| body.value)),
+            );
+        }
+    }
+    assert!(log_bodies.contains(&Value::StringValue("emitted after the attach".to_string())));
+    assert!(!log_bodies.contains(&Value::StringValue("emitted before the attach".to_string())));
+
+    let mut span_names = Vec::new();
+    for request in exported_requests::<ExportTraceServiceRequest>(&received, "/v1/traces") {
+        for traces in request.resource_spans {
+            assert_service_name(traces.resource.as_ref(), service_name);
+            span_names.extend(
+                traces
+                    .scope_spans
+                    .into_iter()
+                    .flat_map(|scope| scope.spans)
+                    .map(|span| span.name),
+            );
+        }
+    }
+    assert!(span_names.iter().any(|name| name == "after_attach"));
+    assert!(!span_names.iter().any(|name| name == "before_attach"));
+
+    let mut metrics = Vec::new();
+    for request in exported_requests::<ExportMetricsServiceRequest>(&received, "/v1/metrics") {
+        for resource_metrics in request.resource_metrics {
+            assert_service_name(resource_metrics.resource.as_ref(), service_name);
+            metrics.extend(
+                resource_metrics
+                    .scope_metrics
+                    .into_iter()
+                    .flat_map(|scope| scope.metrics),
+            );
+        }
+    }
+    assert!(
+        metrics
+            .iter()
+            .all(|metric| metric.name != "late_otlp_before_attach")
+    );
+    let counter = metrics
+        .iter()
+        .find(|metric| metric.name == "late_otlp_after_attach")
+        .expect("counter exported after attach");
+    let Some(metric::Data::Sum(sum)) = &counter.data else {
+        panic!("counter must export a sum: {:?}", counter.data);
+    };
+    assert!(sum.is_monotonic);
+    assert!(
+        sum.data_points
+            .iter()
+            .any(|point| point.value == Some(number_data_point::Value::AsInt(7)))
+    );
 }
