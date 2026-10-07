@@ -46,11 +46,15 @@
 //! compilable loading example.
 
 mod config;
+mod deferred;
 mod endpoint;
 mod providers;
 mod rate_limit;
 
 pub use config::{OtlpConfig, OtlpHeadersConfig};
 
-pub(crate) use providers::{BuiltProviders, build_providers};
+pub(crate) use deferred::{
+    DEFERRED_FILTER, DeferredOtlp, DeferredProviders, build_deferred_providers,
+};
+pub(crate) use providers::{build_providers, check_exporters};
 pub(crate) use rate_limit::RateLimitFilter;

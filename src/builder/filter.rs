@@ -14,13 +14,24 @@ pub(crate) fn resolve_stdout_filter(
     env_var_name: &Option<String>,
     stdout_filter: &Option<String>,
 ) -> String {
-    if let Some(env_var_name) = env_var_name
-        && let Ok(filter) = std::env::var(env_var_name)
-    {
-        return filter;
-    }
+    environment_filter(env_var_name)
+        .or_else(|| stdout_filter.clone())
+        .unwrap_or_else(|| "info".to_string())
+}
 
-    stdout_filter.clone().unwrap_or_else(|| "info".to_string())
+/// Reads the local filter from the configured environment variable.
+///
+/// # Arguments
+///
+/// * `env_var_name` - Optional environment variable name to query.
+///
+/// # Returns
+///
+/// The variable's value when it is configured and set.
+pub(crate) fn environment_filter(env_var_name: &Option<String>) -> Option<String> {
+    env_var_name
+        .as_ref()
+        .and_then(|name| std::env::var(name).ok())
 }
 
 /// Resolves the local filter using a caller-provided lookup function.

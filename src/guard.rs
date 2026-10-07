@@ -36,6 +36,8 @@ pub struct TelemetryGuard {
     /// Shared cancellation token used to signal shutdown to all background tasks.
     pub(crate) cancel_token: CancellationToken,
     pub(crate) background_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// What `init()` prepared for a late configuration, until it is applied.
+    pub(crate) late: Option<crate::late::LateSlot>,
 }
 
 impl TelemetryGuard {
@@ -54,7 +56,48 @@ impl TelemetryGuard {
             meter_provider: None,
             cancel_token,
             background_tasks: Vec::new(),
+            late: None,
         }
+    }
+
+    /// Applies a configuration that became known after `init()`, once.
+    ///
+    /// Requires [`crate::TelemetryBuilder::with_late_configuration`]. The
+    /// stdout filter is replaced unless the environment variable chose it at
+    /// init. With the `otlp` feature, a late OTLP configuration starts trace,
+    /// log, and metric export; the metric pipeline becomes the global meter
+    /// provider. Events emitted before this call are not exported.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The late configuration.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the configuration is in effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::TelemetryError::LateConfigurationUnavailable`] when no
+    /// late configuration was requested, one was already applied, or
+    /// [`TelemetryGuard::shutdown`] has started,
+    /// [`crate::TelemetryError::OtlpAlreadyConfigured`] for a late OTLP
+    /// configuration when OTLP was configured at init, and a filter or exporter
+    /// error otherwise. A failed call consumes the slot.
+    pub fn apply_late_configuration(
+        &mut self,
+        config: crate::LateConfiguration,
+    ) -> Result<(), crate::TelemetryError> {
+        let slot = self
+            .late
+            .take()
+            .ok_or(crate::TelemetryError::LateConfigurationUnavailable)?;
+        let _applied = slot.apply(config)?;
+        #[cfg(feature = "otlp")]
+        if let Some(meter_provider) = _applied.meter_provider {
+            self.meter_provider = Some(meter_provider);
+        }
+        Ok(())
     }
 
     /// Requests graceful shutdown, waits for background tasks to finish, and
@@ -79,6 +122,10 @@ impl TelemetryGuard {
             return Ok(());
         }
 
+        // Providers built by a later late configuration would escape teardown,
+        // because neither a repeated shutdown nor drop shuts providers down
+        // again.
+        self.late = None;
         self.request_shutdown();
         let task_result = self.wait_for_background_tasks().await;
         self.shutdown_providers();
@@ -222,6 +269,28 @@ mod tests {
 
         assert!(guard.shutdown().await.is_ok());
         assert!(guard.shutdown().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn late_configuration_is_refused_after_shutdown() {
+        let mut guard = TelemetryGuard::new(CancellationToken::new());
+        guard.late = Some(crate::late::LateSlot {
+            stdout_reload: std::sync::Arc::new(|_| Ok(())),
+            stdout_current: crate::reload::shared_filter("info"),
+            stdout_from_env: false,
+            #[cfg(feature = "otlp")]
+            otlp: None,
+            #[cfg(feature = "otlp")]
+            otlp_current: crate::reload::shared_otlp_filter(None),
+        });
+
+        assert!(guard.shutdown().await.is_ok());
+        let result = guard.apply_late_configuration(crate::LateConfiguration::new());
+
+        assert!(matches!(
+            result,
+            Err(crate::TelemetryError::LateConfigurationUnavailable)
+        ));
     }
 
     #[tokio::test]

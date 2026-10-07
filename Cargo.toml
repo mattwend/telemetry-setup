@@ -58,12 +58,18 @@ name = "stdout_only"
 name = "stdout_custom_filter"
 
 [dev-dependencies]
+opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "trace", "logs", "metrics"] }
+prost = "0.14.4"
 toml = "1.1.6"
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
 
 [[test]]
 name = "init_otlp"
+required-features = ["otlp"]
+
+[[test]]
+name = "init_late_otlp"
 required-features = ["otlp"]
 
 [[test]]
@@ -76,4 +82,8 @@ required-features = ["log-control"]
 
 [[test]]
 name = "init_otlp_log_control"
+required-features = ["otlp", "log-control"]
+
+[[test]]
+name = "init_late_otlp_log_control"
 required-features = ["otlp", "log-control"]

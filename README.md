@@ -100,6 +100,47 @@ Defaults:
 
 Use `TelemetryBuilder::without_env_var()` to ignore `RUST_LOG`.
 
+## Late configuration
+
+A service that must emit before it can read its own telemetry configuration —
+for example a daemon provisioned over its own API — requests a late
+configuration at init and applies it once:
+
+```rust
+# use telemetry_setup::{LateConfiguration, OtlpConfig, TelemetryBuilder};
+# async fn example(otlp: OtlpConfig) -> Result<(), telemetry_setup::TelemetryError> {
+let mut telemetry = TelemetryBuilder::new("controller")
+    .with_late_configuration()
+    .init()?;
+tracing::info!("waiting for configuration");
+
+telemetry.apply_late_configuration(
+    LateConfiguration::new()
+        .with_stdout_filter("info,controller=debug")
+        .with_otlp_config(otlp),
+)?;
+# telemetry.shutdown().await
+# }
+```
+
+The subscriber is still installed exactly once. With `otlp` enabled and no
+OTLP configuration at init, the OTLP trace and log layers are installed
+filtered `off` and without an exporter; applying a late OTLP configuration
+fills their processor slots, sets their filter and rate limit, and installs the
+metric pipeline as the global meter provider. Events emitted before the call
+are not exported. The stdout filter is replaced unless the configured
+environment variable chose it at init. Log control reports and manages both
+late filters: until a late OTLP configuration is applied, `GET /filters`
+reports `"otlp": null` and `PUT /filters/otlp` returns `404`. A late OTLP
+configuration is refused when OTLP was configured at init, and a second
+application or one after `shutdown()` is refused. Tokio runtime metrics started
+at init keep the meter provider that was global then.
+
+A failed application consumes the late slot. A service that must refuse an
+unusable configuration before committing to it calls
+`LateConfiguration::validate` first: it parses every filter and builds, then
+drops, every OTLP exporter, without installing anything.
+
 ## Log control API
 
 When `log-control` is enabled, the crate binds an HTTP server only on `127.0.0.1`.
@@ -108,7 +149,7 @@ Invalid filters return `400`.
 
 - `GET /filters` returns `{ "stdout": "...", "otlp": "..." | null }`
 - `PUT /filters/stdout` accepts `{ "filter": "..." }` and returns the updated filter state
-- `PUT /filters/otlp` accepts `{ "filter": "..." }`, returns the updated filter state, and returns `404` when OTLP is unavailable
+- `PUT /filters/otlp` accepts `{ "filter": "..." }`, returns the updated filter state, and returns `404` while OTLP export is not running
 
 ## Examples
 

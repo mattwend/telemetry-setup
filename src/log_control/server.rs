@@ -110,13 +110,12 @@ mod tests {
         let reload_calls = std::sync::Arc::new(AtomicUsize::new(0));
         let callback_calls = reload_calls.clone();
         let state = ReloadState::new(
-            "info".to_string(),
-            None,
+            crate::reload::shared_filter("info"),
+            crate::reload::shared_otlp_filter(None),
             std::sync::Arc::new(move |_| {
                 callback_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }),
-            None,
         );
         let cancel_token = CancellationToken::new();
         let handle = spawn_log_control_server_from_listener(listener, state, cancel_token.clone());
@@ -165,10 +164,9 @@ mod tests {
         let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = occupied.local_addr().unwrap().port();
         let state = ReloadState::new(
-            "info".to_string(),
-            None,
+            crate::reload::shared_filter("info"),
+            crate::reload::shared_otlp_filter(None),
             std::sync::Arc::new(|_| Ok(())),
-            None,
         );
 
         let error =

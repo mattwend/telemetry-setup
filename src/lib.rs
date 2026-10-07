@@ -73,12 +73,14 @@
 mod builder;
 mod error;
 mod guard;
+mod late;
 #[cfg(feature = "log-control")]
 #[cfg_attr(docsrs, doc(cfg(feature = "log-control")))]
 mod log_control;
 #[cfg(feature = "otlp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "otlp")))]
 mod otlp;
+mod reload;
 #[cfg(feature = "tokio-metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio-metrics")))]
 mod tokio_metrics;
@@ -86,6 +88,7 @@ mod tokio_metrics;
 pub use builder::TelemetryBuilder;
 pub use error::TelemetryError;
 pub use guard::TelemetryGuard;
+pub use late::LateConfiguration;
 #[cfg(feature = "log-control")]
 #[cfg_attr(docsrs, doc(cfg(feature = "log-control")))]
 pub use log_control::LogControlConfig;

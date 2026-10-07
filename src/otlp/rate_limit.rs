@@ -11,9 +11,14 @@ use tracing_subscriber::layer::{Context, Filter};
 
 const RATE_LIMIT_TARGET: &str = "telemetry::otlp::rate_limit";
 
+/// The stored limit that means "no limit".
+const UNLIMITED: u64 = u64::MAX;
+
+/// Rate limit of OTLP log export. Clones share the limit and the window, so a
+/// late configuration can set the limit of an installed filter.
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitFilter {
-    limit_per_sec: Option<u64>,
+    limit_per_sec: Arc<AtomicU64>,
     state: Arc<State>,
 }
 
@@ -40,7 +45,7 @@ impl RateLimitFilter {
     /// A filter initialized for the current Unix-second window.
     pub(crate) fn new_optional(limit_per_sec: Option<u64>) -> Self {
         Self {
-            limit_per_sec,
+            limit_per_sec: Arc::new(AtomicU64::new(limit_per_sec.unwrap_or(UNLIMITED))),
             state: Arc::new(State {
                 current_second: AtomicU64::new(current_unix_second()),
                 seen_this_second: AtomicU64::new(0),
@@ -50,11 +55,22 @@ impl RateLimitFilter {
         }
     }
 
+    /// Replaces the limit of this filter and of every clone.
+    ///
+    /// # Arguments
+    ///
+    /// * `limit_per_sec` - The new limit, or `None` to disable limiting.
+    pub(crate) fn set_limit(&self, limit_per_sec: Option<u64>) {
+        self.limit_per_sec
+            .store(limit_per_sec.unwrap_or(UNLIMITED), Ordering::Relaxed);
+    }
+
     /// Returns whether an event described by `metadata` should reach the OTLP log layer.
     fn allow(&self, metadata: &Metadata<'_>) -> bool {
-        let Some(limit_per_sec) = self.limit_per_sec else {
+        let limit_per_sec = self.limit_per_sec.load(Ordering::Relaxed);
+        if limit_per_sec == UNLIMITED {
             return true;
-        };
+        }
 
         if metadata.target() == RATE_LIMIT_TARGET {
             return true;
@@ -216,5 +232,17 @@ mod tests {
         );
 
         assert!(filter.allow(&TEST_METADATA));
+    }
+
+    #[test]
+    fn a_set_limit_reaches_every_clone() {
+        let filter = RateLimitFilter::new_optional(None);
+        let installed = filter.clone();
+
+        assert!(installed.allow(&TEST_METADATA));
+        filter.set_limit(Some(0));
+        assert!(!installed.allow(&TEST_METADATA));
+        filter.set_limit(None);
+        assert!(installed.allow(&TEST_METADATA));
     }
 }

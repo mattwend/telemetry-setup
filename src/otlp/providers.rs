@@ -49,17 +49,11 @@ pub(crate) fn build_providers(
     service_name: &str,
     config: &OtlpConfig,
 ) -> Result<BuiltProviders, TelemetryError> {
-    let effective_service_name = config
-        .service_name
-        .clone()
-        .unwrap_or_else(|| service_name.to_string());
-    let resource = Resource::builder()
-        .with_service_name(effective_service_name.clone())
-        .build();
+    let effective_service_name = effective_service_name(service_name, config);
+    let resource = resource(&effective_service_name);
 
     let trace_exporter = build_trace_exporter(config)?;
     let log_exporter = build_log_exporter(config)?;
-    let metric_exporter = build_metric_exporter(config)?;
 
     let tracer_provider = SdkTracerProvider::builder()
         .with_resource(resource.clone())
@@ -71,14 +65,7 @@ pub(crate) fn build_providers(
         .with_batch_exporter(log_exporter)
         .build();
 
-    let reader = PeriodicReader::builder(metric_exporter)
-        .with_interval(config.metrics_interval)
-        .build();
-    let meter_provider = SdkMeterProvider::builder()
-        .with_resource(resource)
-        .with_reader(reader)
-        .build();
-    global::set_meter_provider(meter_provider.clone());
+    let meter_provider = build_meter_provider(config, resource)?;
 
     Ok(BuiltProviders {
         tracer_provider,
@@ -89,8 +76,84 @@ pub(crate) fn build_providers(
     })
 }
 
+/// Returns the `service.name` to export: the configured override, else the
+/// builder's service name.
+///
+/// # Arguments
+///
+/// * `service_name` - The builder's service name.
+/// * `config` - OTLP configuration that may override it.
+///
+/// # Returns
+///
+/// The effective service name.
+pub(super) fn effective_service_name(service_name: &str, config: &OtlpConfig) -> String {
+    config
+        .service_name
+        .clone()
+        .unwrap_or_else(|| service_name.to_string())
+}
+
+/// Builds the resource every signal is exported with.
+///
+/// # Arguments
+///
+/// * `service_name` - The effective `service.name`.
+///
+/// # Returns
+///
+/// A resource carrying `service.name`.
+pub(super) fn resource(service_name: &str) -> Resource {
+    Resource::builder()
+        .with_service_name(service_name.to_string())
+        .build()
+}
+
+/// Builds the metric pipeline and installs it as the OpenTelemetry global
+/// meter provider.
+///
+/// # Arguments
+///
+/// * `config` - OTLP collector endpoint, headers, and export interval.
+/// * `resource` - Resource attached to every exported metric.
+///
+/// # Returns
+///
+/// The installed meter provider.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError`] when the metric exporter cannot be built.
+pub(super) fn build_meter_provider(
+    config: &OtlpConfig,
+    resource: Resource,
+) -> Result<SdkMeterProvider, TelemetryError> {
+    let reader = PeriodicReader::builder(build_metric_exporter(config)?)
+        .with_interval(config.metrics_interval)
+        .build();
+    let meter_provider = SdkMeterProvider::builder()
+        .with_resource(resource)
+        .with_reader(reader)
+        .build();
+    global::set_meter_provider(meter_provider.clone());
+    Ok(meter_provider)
+}
+
+/// Checks that every exporter `config` names can be built, without installing
+/// anything.
+///
+/// The exporters are built and dropped, so this sees exactly what an
+/// installation would, including the environment variables the exporter
+/// builders read.
+pub(crate) fn check_exporters(config: &OtlpConfig) -> Result<(), TelemetryError> {
+    build_trace_exporter(config)?;
+    build_log_exporter(config)?;
+    build_metric_exporter(config)?;
+    Ok(())
+}
+
 /// Builds the OTLP trace exporter from `config`.
-fn build_trace_exporter(
+pub(super) fn build_trace_exporter(
     config: &OtlpConfig,
 ) -> Result<opentelemetry_otlp::SpanExporter, TelemetryError> {
     opentelemetry_otlp::SpanExporter::builder()
@@ -103,7 +166,7 @@ fn build_trace_exporter(
 }
 
 /// Builds the OTLP log exporter from `config`.
-fn build_log_exporter(
+pub(super) fn build_log_exporter(
     config: &OtlpConfig,
 ) -> Result<opentelemetry_otlp::LogExporter, TelemetryError> {
     opentelemetry_otlp::LogExporter::builder()

@@ -16,11 +16,11 @@
 //! - `PUT /filters/stdout` accepts `{ "filter": "..." }` and returns the
 //!   updated filter state or `400 Bad Request`
 //! - `PUT /filters/otlp` accepts `{ "filter": "..." }` and returns the updated
-//!   filter state, `400 Bad Request`, or `404 Not Found` when OTLP is
-//!   unavailable for the process
+//!   filter state, `400 Bad Request`, or `404 Not Found` while OTLP export is
+//!   not running
 //!
-//! `PUT /filters/otlp` updates OTLP trace and log filters only when OTLP is
-//! enabled for the process.
+//! `PUT /filters/otlp` updates OTLP trace and log filters once OTLP export runs,
+//! whether it was configured at init or by a late configuration.
 
 mod config;
 mod reload;
@@ -29,7 +29,5 @@ mod server;
 
 pub use config::LogControlConfig;
 
-#[cfg(feature = "otlp")]
-pub(crate) use reload::otlp_reload_callback;
-pub(crate) use reload::{ReloadCallback, ReloadState, stdout_reload_callback};
+pub(crate) use reload::ReloadState;
 pub(crate) use server::spawn_log_control_server;
